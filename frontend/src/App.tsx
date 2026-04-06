@@ -1,28 +1,293 @@
-import {useState} from 'react';
-import logo from './assets/images/logo-universal.png';
+import { useEffect, useRef, useState } from 'react';
 import './App.css';
-import {Greet} from "../wailsjs/go/main/App";
+import { EventsOn } from '../wailsjs/runtime/runtime';
+import { GetRuntimeState, StartListening, StopListening } from '../wailsjs/go/main/App';
+import { SceneManager } from './avatar/scene-manager';
+import { AvatarManager } from './avatar/avatar-manager';
+import { CaptionManager } from './avatar/caption-manager';
+import type { AvatarMotionFrame } from './avatar/motion-types';
 
-function App() {
-    const [resultText, setResultText] = useState("Please enter your name below 👇");
-    const [name, setName] = useState('');
-    const updateName = (e: any) => setName(e.target.value);
-    const updateResultText = (result: string) => setResultText(result);
-
-    function greet() {
-        Greet(name).then(updateResultText);
-    }
-
-    return (
-        <div id="App">
-            <img src={logo} id="logo" alt="logo"/>
-            <div id="result" className="result">{resultText}</div>
-            <div id="input" className="input-box">
-                <input id="name" className="input" onChange={updateName} autoComplete="off" name="input" type="text"/>
-                <button className="btn" onClick={greet}>Greet</button>
-            </div>
-        </div>
-    )
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
 }
 
-export default App
+interface ProviderStatus {
+  openai_configured: boolean;
+  deepgram_configured: boolean;
+  cartesia_configured: boolean;
+}
+
+interface RuntimeState {
+  app_name: string;
+  config_path: string;
+  log_path: string;
+  log_directory: string;
+  config: {
+    llm: {
+      openai: {
+        model: string;
+      };
+    };
+    stt: {
+      deepgram: {
+        model: string;
+        language: string;
+      };
+    };
+    tts: {
+      cartesia: {
+        voice_id: string;
+        model_id: string;
+        sample_rate: number;
+      };
+    };
+  };
+  providers: ProviderStatus;
+  platform_note: string;
+}
+
+function App() {
+  const [state, setState] = useState<RuntimeState | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeech, setIsSpeech] = useState(false);
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const [chatStatus, setChatStatus] = useState<'idle' | 'thinking'>('idle');
+  const [subtitle, setSubtitle] = useState('');
+  const [subtitleThinking, setSubtitleThinking] = useState(false);
+  const [subtitleVisible, setSubtitleVisible] = useState(false);
+  const [errorText, setErrorText] = useState('');
+
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const captionManagerRef = useRef<CaptionManager | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const sceneManagerRef = useRef<SceneManager | null>(null);
+  const avatarManagerRef = useRef<AvatarManager | null>(null);
+
+  useEffect(() => {
+    GetRuntimeState()
+      .then(setState)
+      .catch((err) => setErrorText(String(err)));
+  }, []);
+
+  useEffect(() => {
+    if (!canvasRef.current) return;
+
+    const sceneManager = new SceneManager(canvasRef.current);
+    sceneManagerRef.current = sceneManager;
+
+    const avatarManager = new AvatarManager();
+    avatarManagerRef.current = avatarManager;
+
+    sceneManager.setAvatar(avatarManager);
+    avatarManager
+      .load(sceneManager.threeScene, '/vrm/Yuna.vrm')
+      .then((headPos) => {
+        sceneManager.frameCamera(headPos);
+      })
+      .catch((err) => setErrorText(`VRM 載入失敗：${String(err)}`));
+
+    return () => {
+      sceneManager.dispose();
+      avatarManager.dispose();
+      sceneManagerRef.current = null;
+      avatarManagerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    captionManagerRef.current = new CaptionManager(
+      (text) => {
+        setSubtitle(text);
+        setSubtitleThinking(false);
+        setSubtitleVisible(true);
+      },
+      () => {
+        setSubtitleVisible(false);
+        setSubtitleThinking(false);
+      },
+      () => {
+        setSubtitleThinking(true);
+        setSubtitleVisible(true);
+      },
+    );
+
+    return () => {
+      captionManagerRef.current?.dispose();
+      captionManagerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const offListening = EventsOn('listening_state', (data: { is_listening: boolean }) => {
+      setIsListening(Boolean(data?.is_listening));
+      if (!data?.is_listening) setIsSpeech(false);
+    });
+    const offVad = EventsOn('vad_status', (data: { is_speech: boolean }) => {
+      setIsSpeech(Boolean(data?.is_speech));
+    });
+    const offChatUpdate = EventsOn('chat_update', (data: ChatMessage) => {
+      if (!data?.content) return;
+      setChatHistory((prev) => [...prev, data]);
+      if (data.role === 'assistant') {
+        captionManagerRef.current?.setPendingText(data.content);
+      }
+    });
+    const offChatStatus = EventsOn('chat_status', (data: { status: 'idle' | 'thinking' }) => {
+      setChatStatus(data?.status ?? 'idle');
+      if (data?.status === 'thinking') {
+        captionManagerRef.current?.showThinking();
+      } else if (data?.status === 'idle') {
+        captionManagerRef.current?.finalizeIdle();
+      }
+    });
+    const offMotion = EventsOn('avatar_motion', (data: AvatarMotionFrame) => {
+      avatarManagerRef.current?.applyMotion(data);
+    });
+    const offTtsStart = EventsOn('tts_start', () => {
+      captionManagerRef.current?.showPendingNow();
+    });
+    const offTtsEnd = EventsOn('tts_end', () => {
+      captionManagerRef.current?.hideSoon();
+    });
+    const offAppError = EventsOn('app_error', (data: { message?: string }) => {
+      if (data?.message) {
+        setErrorText(data.message);
+      }
+    });
+
+    return () => {
+      offListening();
+      offVad();
+      offChatUpdate();
+      offChatStatus();
+      offMotion();
+      offTtsStart();
+      offTtsEnd();
+      offAppError();
+    };
+  }, []);
+
+  useEffect(() => {
+    const container = chatContainerRef.current;
+    if (!container) return;
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior: 'smooth',
+    });
+  }, [chatHistory, chatStatus]);
+
+  const providersReady = Boolean(
+    state?.providers?.openai_configured &&
+      state?.providers?.deepgram_configured &&
+      state?.providers?.cartesia_configured,
+  );
+
+  const toggleListening = async () => {
+    setErrorText('');
+    try {
+      if (isListening) {
+        await StopListening();
+      } else {
+        await StartListening();
+      }
+    } catch (err) {
+      setErrorText(String(err));
+    }
+  };
+
+  return (
+    <div className="app-shell">
+      <section className="avatar-panel">
+        <canvas ref={canvasRef} />
+        <div className={`status-orb ${isSpeech ? 'active' : ''}`} />
+
+        <div className="hero-copy">
+          <span className="hero-kicker">Desktop Voice Assistant</span>
+          <h1>{state?.app_name ?? 'Miko'}</h1>
+          <p>Wails + Go + React + Three VRM</p>
+        </div>
+
+        <div className={`subtitle-box${subtitleVisible ? ' visible' : ''}`}>
+          {subtitleThinking ? (
+            <span className="subtitle-thinking">
+              思考中
+              <span className="caption-dots">
+                <span /><span /><span />
+              </span>
+            </span>
+          ) : subtitle}
+        </div>
+      </section>
+
+      <aside className="chat-panel">
+        <div className="panel-header">
+          <div>
+            <div className="eyebrow">Cloud Pipeline</div>
+            <h2>語音互動控制台</h2>
+          </div>
+          <div className={`pill ${providersReady ? 'ready' : 'warning'}`}>
+            {providersReady ? 'API Ready' : 'API Missing'}
+          </div>
+        </div>
+
+        <div className="meta-grid">
+          <div className="meta-card">
+            <span>STT</span>
+            <strong>{state?.config.stt.deepgram.model ?? 'deepgram'}</strong>
+            <small>{state?.config.stt.deepgram.language ?? 'zh-TW'}</small>
+          </div>
+          <div className="meta-card">
+            <span>LLM</span>
+            <strong>{state?.config.llm.openai.model ?? 'openai'}</strong>
+            <small>OpenAI Chat Completions API</small>
+          </div>
+          <div className="meta-card">
+            <span>TTS</span>
+            <strong>{state?.config.tts.cartesia.model_id ?? 'cartesia'}</strong>
+            <small>{state?.config.tts.cartesia.voice_id ?? '-'}</small>
+          </div>
+        </div>
+
+        <div ref={chatContainerRef} className="chat-container">
+          {chatHistory.length === 0 ? (
+            <div className="empty-state">
+              <p>點擊下方按鈕後，後端會開始本機收音，並將語音送往 Deepgram、OpenAI 與 Cartesia。</p>
+              <p className="note">{state?.platform_note}</p>
+              <p className="path">{state?.config_path}</p>
+              <p className="path">{state?.log_path}</p>
+            </div>
+          ) : (
+            chatHistory.map((msg, idx) => (
+              <div key={`${msg.role}-${idx}`} className={`chat-bubble ${msg.role}`}>
+                {msg.content}
+              </div>
+            ))
+          )}
+
+          {chatStatus === 'thinking' && (
+            <div className="chat-bubble assistant thinking">
+              <span className="dot" />
+              <span className="dot" />
+              <span className="dot" />
+            </div>
+          )}
+          <div ref={chatEndRef} />
+        </div>
+
+        {errorText ? <div className="error-banner">{errorText}</div> : null}
+
+        <button
+          className={`mic-btn ${isListening ? 'listening' : ''}`}
+          onClick={toggleListening}
+          disabled={!providersReady && !isListening}
+        >
+          {isListening ? '停止交談' : '開始交談'}
+        </button>
+      </aside>
+    </div>
+  );
+}
+
+export default App;

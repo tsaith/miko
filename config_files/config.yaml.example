@@ -1,0 +1,40 @@
+# Miko configuration file
+#
+# Copy this file to ~/.miko/config.yaml and adjust as needed.
+# All fields are optional. Missing values fall back to built-in defaults.
+#
+#   mkdir -p ~/.miko
+#   cp config_files/config.yaml.example ~/.miko/config.yaml
+#
+
+api_keys:
+  openai: YOUR_OPENAI_API_KEY
+  deepgram: YOUR_DEEPGRAM_API_KEY
+  cartesia: YOUR_CARTESIA_API_KEY
+
+llm:
+  engine: openai
+  openai:
+    model: gpt-4o-mini
+    max_output_tokens: 250
+    temperature: 0.7
+
+stt:
+  engine: deepgram
+  deepgram:
+    model: nova-2
+    language: zh-TW
+    smart_format: true
+    interim_results: true
+    vad_events: true
+    endpointing_ms: 300
+    utterance_end_ms: 1200
+
+tts:
+  engine: cartesia
+  cartesia:
+    voice_id: 6eb8965c-e295-47bd-a9e4-3eeebb3abcff
+    model_id: sonic-3
+    language: zh
+    sample_rate: 16000
+    api_version: 2025-04-16

@@ -5,7 +5,13 @@ frontend/dist
 # Temporary files
 frontend/wailsjs/*
 frontend/package.json.md5
+.gocache/
+
+# VRM models
+frontend/public/vrm/*
+*.vrm
 
 # Credential
+.env
 env
 env.*

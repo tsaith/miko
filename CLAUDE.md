@@ -1,229 +1,177 @@
-# Echo — CLAUDE.md
+# Miko — CLAUDE.md
 
-Personal AI voice assistant with local microphone capture, local speaker playback, STT, LLM, TTS, and a 3D VRM avatar UI.
+Miko 是一個桌上型語音智能助理，使用 Wails 封裝 Go 後端與 React 前端，並透過 VRM 顯示 bust view Avatar。
 
-## Project Layout
+## 實際技術架構
+
+- 桌面殼：Wails
+- 後端：Go
+- 前端：TypeScript + React
+- 3D Avatar：Three.js + `@pixiv/three-vrm`
+- 雲端服務：
+  - Deepgram STT
+  - OpenAI LLM
+  - Cartesia TTS
+- OpenAI SDK：
+  - 官方 `github.com/openai/openai-go/v3`
+
+## 不支援的內容
+
+- 不支援本地 Whisper / Qwen / Kokoro / MLX 模型
+- 不支援瀏覽器端錄音與瀏覽器端 TTS 播放
+- 不使用 FastAPI 或 WebSocket
+
+## 專案結構
 
 ```text
-echo/
-  main.py                              # FastAPI WebSocket entry point
-  app/
-    core/
-      settings.py                      # Pydantic settings (.env)
-      echo_config.py                   # ~/.echo/config.yaml loader
-    lib/
-      avatar/
-        motion_controller.py           # Backend avatar motion runtime entry
-        pose_manager.py                # Backend pose state machine
-        expression_manager.py          # Backend expression state machine
-        motion_types.py                # Motion frame schema
+miko/
+  main.go
+  app.go
+  internal/
+    assistant/service.go
+    audio/service.go
+    config/
+      config.go
+      runtime.go
+    debuglog/logger.go
+    avatar/
+      motion_controller.go
+      pose_manager.go
+      expression_manager.go
+      types.go
     services/
-      local_audio_service.py           # Local microphone / speaker I/O via PyAudio
-      vad_service.py                   # Silero VAD (512-sample chunks)
-      stt_service.py                   # STT router
-      llm_service.py                   # LLM router
-      tts_service.py                   # TTS router
-      brain_service.py                 # Conversation state + LLM coordinator
-      kokoro_tts_service.py            # Local Kokoro TTS
-      cartesia_tts_service.py          # Cloud Cartesia TTS
-      mlx_qwen3_stt_service.py         # Local Qwen3 ASR
-      mlx_whisper_stt_service.py       # Local Whisper ASR
-      deepgram_stt_service.py          # Cloud Deepgram STT
-      mlx_qwen3_llm_service.py         # Local Qwen3 LLM
-      openai_llm_service.py            # Cloud OpenAI LLM
-  ui/
+      brain/brain.go
+      llm/openai.go
+      stt/deepgram.go
+      tts/cartesia.go
+  frontend/
     src/
-      App.tsx                          # Main React UI, WebSocket control + state display
-      App.css                          # Layout styles
+      App.tsx
+      App.css
       avatar/
-        scene-manager.ts               # Three.js scene / camera / render loop
-        avatar-manager.ts              # VRM load + motion application
-        expression-manager.ts          # Apply backend expression channels
-        pose-manager.ts                # Apply backend pose channels
-        motion-types.ts                # Frontend motion frame types
-        caption-manager.ts             # Subtitle timing driven by backend events
+        avatar-manager.ts
+        scene-manager.ts
+        expression-manager.ts
+        pose-manager.ts
+        caption-manager.ts
+        motion-types.ts
     public/
-      vrm/Yuna.vrm                     # VRM avatar model
+      vrm/
+        Yuna.vrm
+        Yuki.vrm
+  config_files/config.yaml.example
 ```
 
 ## Runtime Model
 
-Echo now follows a **backend-owned audio pipeline**:
+Miko 採用後端掌控音訊裝置的桌面助理架構：
 
-- Backend owns:
-  - microphone capture
-  - speaker playback
-  - VAD / STT / LLM / TTS
-  - avatar motion generation
-- Frontend owns:
-  - VRM rendering
-  - chat / subtitle / status UI
-  - start / stop interaction controls
+- 後端負責：
+  - 麥克風收音
+  - 喇叭播放
+  - Deepgram STT
+  - OpenAI 回覆生成
+  - Cartesia TTS
+  - Avatar motion frame 生成
+- 前端負責：
+  - VRM 顯示
+  - chat UI
+  - 字幕
+  - listening / thinking / VAD 狀態
+  - 右側聊天面板內部捲動
 
-The frontend no longer captures microphone PCM and no longer plays TTS audio directly.
+## Event Protocol
 
-## Development Commands
+前端呼叫 Go methods：
 
-### Backend
+- `StartListening()`
+- `StopListening()`
+- `GetRuntimeState()`
 
-```bash
-# from project root
-cp .env.example .env
+後端透過 Wails events 推送：
 
-# recommended: use project venv / uv
-uv run python -m uvicorn main:app
-```
+- `listening_state`
+- `vad_status`
+- `chat_update`
+- `chat_status`
+- `tts_start`
+- `tts_end`
+- `avatar_motion`
+- `app_error`
 
-Backend listens on `http://127.0.0.1:8000`.
+## 設定檔
 
-### Frontend
-
-```bash
-cd ui
-npm install
-npm run dev
-npm run build
-npm run lint
-```
-
-Frontend dev server runs on `http://localhost:5173`.
-
-## WebSocket Event Protocol
-
-All frontend/backend communication goes through `ws://localhost:8000/ws`.
-
-### Frontend → Backend
-
-| Event | Payload | Description |
-|------|------|-------------|
-| `start_listen` | `{"event":"start_listen"}` | Start local microphone capture and conversation |
-| `stop_listen` | `{"event":"stop_listen"}` | Stop local microphone capture and stop current speech |
-
-No binary PCM is sent from the browser anymore.
-
-### Backend → Frontend
-
-| Event | Data | Description |
-|------|------|-------------|
-| `listening_state` | `{is_listening: boolean}` | Current conversation capture state |
-| `vad_status` | `{is_speech: boolean}` | Current speech activity state |
-| `chat_update` | `{role, content}` | New user / assistant message |
-| `chat_status` | `{status: "idle" | "thinking"}` | LLM inference state |
-| `tts_start` | `{}` | Backend speaker playback started |
-| `tts_end` | `{}` | Backend speaker playback finished |
-| `avatar_motion` | `AvatarMotionFrame` | Backend-generated avatar pose / expression frame |
-
-## Audio Pipeline
-
-### Input
-
-- `LocalAudioService` opens the local microphone through `PyAudio`
-- audio format is fixed at:
-  - `16kHz`
-  - `mono`
-  - `Int16 PCM`
-- captured PCM is pushed into an `asyncio.Queue`
-- `main.py` drains the queue and feeds:
-  - VAD
-  - STT
-
-### VAD
-
-- `VADService.BUFFER_SIZE = 512`
-- audio is accumulated in a per-session `audio_buffer`
-- backend slices buffered audio into exact 512-sample chunks before VAD inference
-
-### STT
-
-- routed by `STTService`
-- supported engines:
-  - `mlx_qwen3`
-  - `mlx_whisper`
-  - `deepgram`
-
-### LLM
-
-- routed by `LLMService`
-- supported engines:
-  - `openai`
-  - `mlx_qwen3`
-- `BrainService` owns the rolling conversation history
-
-### TTS + Playback
-
-- routed by `TTSService`
-- supported engines:
-  - `kokoro`
-  - `cartesia`
-- backend directly plays generated PCM through `LocalAudioService.play_audio()`
-- frontend only gets `tts_start` / `tts_end` for subtitle timing
-
-## Avatar Motion
-
-Backend motion is generated under `app/lib/avatar/`:
-
-- `motion_controller.py`
-- `pose_manager.py`
-- `expression_manager.py`
-- `motion_types.py`
-
-The backend continuously pushes motion frames to the frontend.
-
-Frontend avatar code only **applies** motion:
-
-- `avatar-manager.ts`
-- `pose-manager.ts`
-- `expression-manager.ts`
-
-There is no browser-side motion state machine for breathing / blinking / lip sync anymore.
-
-## Current Constraints
-
-- local audio I/O currently assumes **one active local capture session at a time**
-- VAD chunk size must remain **512**
-- local playback / local capture are handled in Python, not browser APIs
-- TTS PCM is expected to be **16kHz Int16 mono**
-- `BrainService` trims history to avoid unbounded context growth
-
-## Engine Selection
-
-Primary engine choices are read from `~/.echo/config.yaml` via `app/core/echo_config.py`.
-
-Supported values:
-
-```yaml
-stt:
-  engine: mlx_qwen3   # mlx_qwen3 | mlx_whisper | deepgram
-
-llm:
-  engine: openai      # openai | mlx_qwen3
-
-tts:
-  engine: kokoro      # kokoro | cartesia
-```
-
-## Environment Variables
-
-Defined in `.env`:
+使用者設定檔位於：
 
 ```text
-OPENAI_API_KEY
-DEEPGRAM_API_KEY
-CARTESIA_API_KEY
-RUN_ENV
-DEBUG_ENABLED
+~/.miko/config.yaml
 ```
 
-## Notes For Future Desktop Packaging
+API keys 定義在這個檔案裡：
 
-This repository is now structurally closer to a desktop-assistant architecture:
+```yaml
+api_keys:
+  openai: YOUR_OPENAI_API_KEY
+  deepgram: YOUR_DEEPGRAM_API_KEY
+  cartesia: YOUR_CARTESIA_API_KEY
+```
 
-- backend already owns local audio devices
-- frontend already behaves like a control / rendering surface
-- the next natural step is wrapping the frontend in a desktop shell while keeping FastAPI as the local orchestration backend
+這些欄位只提供後端使用，不會序列化到前端。
 
-## Docs
+Miko 啟動時也會自動建立：
 
-- Architecture overview: `AGENTS.md`
-- VRM design docs: `docs/superpowers/specs/2026-03-31-vrm-avatar-design.md`
-- VRM implementation plan: `docs/superpowers/plans/2026-03-31-vrm-avatar.md`
+```text
+~/.miko/workspace/
+```
+
+## Debug Log
+
+後端會自動將 debug log 寫到：
+
+```text
+~/.miko/workspace/logs/
+```
+
+啟動時會自動清理超過 5 天的 `miko-YYYY-MM-DD.log`。
+
+每次對話都會帶 session id，並記錄：
+
+- listening start / stop
+- Deepgram utterance lifecycle
+- Deepgram KeepAlive / reconnect lifecycle
+- OpenAI request timing
+- Cartesia request timing
+- audio playback backend 與錯誤
+
+## 主要可設定欄位
+
+- OpenAI model
+- Deepgram model / language / endpointing
+- Cartesia voice_id / model_id / sample_rate / api_version
+
+Cartesia `voice_id` 的 fallback 為：
+
+```text
+6eb8965c-e295-47bd-a9e4-3eeebb3abcff
+```
+
+## 開發命令
+
+```bash
+wails dev
+wails build
+```
+
+如需先安裝前端依賴：
+
+```bash
+cd frontend
+npm install
+```
+
+## 平台目標
+
+- macOS
+- Linux ARM64
+
+這包含 Raspberry Pi 類型的 ARM64 Linux 裝置，但仍需要目標系統本身具備可用的音訊輸入輸出裝置與對應驅動。
