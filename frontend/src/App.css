@@ -32,36 +32,6 @@
   pointer-events: none;
 }
 
-.hero-copy {
-  position: absolute;
-  top: 2rem;
-  left: 2rem;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-
-.hero-copy h1 {
-  margin: 0;
-  font-size: clamp(2.4rem, 4vw, 4.3rem);
-  line-height: 0.95;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.hero-copy p,
-.hero-kicker {
-  margin: 0;
-  color: rgba(226, 232, 240, 0.82);
-}
-
-.hero-kicker {
-  font-size: 0.78rem;
-  letter-spacing: 0.28em;
-  text-transform: uppercase;
-}
-
 .status-orb {
   position: absolute;
   bottom: 1.6rem;
@@ -147,24 +117,10 @@
   overflow: hidden;
 }
 
-.panel-header {
+.panel-status {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
+  justify-content: flex-end;
   flex: 0 0 auto;
-}
-
-.panel-header h2 {
-  margin: 0.1rem 0 0;
-  font-size: 1.45rem;
-}
-
-.eyebrow {
-  color: #7dd3fc;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  font-size: 0.72rem;
 }
 
 .pill {
@@ -184,46 +140,6 @@
 .pill.warning {
   color: #fde68a;
   background: rgba(146, 64, 14, 0.3);
-}
-
-.meta-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.8rem;
-  flex: 0 0 auto;
-}
-
-.meta-card {
-  padding: 0.9rem;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  min-width: 0;
-}
-
-.meta-card span,
-.meta-card small {
-  display: block;
-}
-
-.meta-card span {
-  color: rgba(148, 163, 184, 0.92);
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-}
-
-.meta-card strong {
-  display: block;
-  margin: 0.45rem 0 0.3rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.meta-card small {
-  color: rgba(226, 232, 240, 0.76);
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .chat-container {
@@ -364,23 +280,8 @@
 }
 
 @media (max-width: 720px) {
-  .panel-header,
-  .meta-grid {
-    grid-template-columns: 1fr;
-    display: grid;
-  }
-
-  .panel-header {
-    gap: 0.75rem;
-  }
-
   .subtitle-box {
     width: calc(100% - 2rem);
     bottom: 1.2rem;
-  }
-
-  .hero-copy {
-    top: 1rem;
-    left: 1rem;
   }
 }

@@ -15,12 +15,6 @@ Miko 是一個桌上型語音智能助理，使用 Wails 封裝 Go 後端與 Rea
 - OpenAI SDK：
   - 官方 `github.com/openai/openai-go/v3`
 
-## 不支援的內容
-
-- 不支援本地 Whisper / Qwen / Kokoro / MLX 模型
-- 不支援瀏覽器端錄音與瀏覽器端 TTS 播放
-- 不使用 FastAPI 或 WebSocket
-
 ## 專案結構
 
 ```text

@@ -58,7 +58,6 @@ function App() {
   const [subtitleVisible, setSubtitleVisible] = useState(false);
   const [errorText, setErrorText] = useState('');
 
-  const chatEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const captionManagerRef = useRef<CaptionManager | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -203,12 +202,6 @@ function App() {
         <canvas ref={canvasRef} />
         <div className={`status-orb ${isSpeech ? 'active' : ''}`} />
 
-        <div className="hero-copy">
-          <span className="hero-kicker">Desktop Voice Assistant</span>
-          <h1>{state?.app_name ?? 'Miko'}</h1>
-          <p>Wails + Go + React + Three VRM</p>
-        </div>
-
         <div className={`subtitle-box${subtitleVisible ? ' visible' : ''}`}>
           {subtitleThinking ? (
             <span className="subtitle-thinking">
@@ -222,31 +215,9 @@ function App() {
       </section>
 
       <aside className="chat-panel">
-        <div className="panel-header">
-          <div>
-            <div className="eyebrow">Cloud Pipeline</div>
-            <h2>語音互動控制台</h2>
-          </div>
+        <div className="panel-status">
           <div className={`pill ${providersReady ? 'ready' : 'warning'}`}>
             {providersReady ? 'API Ready' : 'API Missing'}
-          </div>
-        </div>
-
-        <div className="meta-grid">
-          <div className="meta-card">
-            <span>STT</span>
-            <strong>{state?.config.stt.deepgram.model ?? 'deepgram'}</strong>
-            <small>{state?.config.stt.deepgram.language ?? 'zh-TW'}</small>
-          </div>
-          <div className="meta-card">
-            <span>LLM</span>
-            <strong>{state?.config.llm.openai.model ?? 'openai'}</strong>
-            <small>OpenAI Chat Completions API</small>
-          </div>
-          <div className="meta-card">
-            <span>TTS</span>
-            <strong>{state?.config.tts.cartesia.model_id ?? 'cartesia'}</strong>
-            <small>{state?.config.tts.cartesia.voice_id ?? '-'}</small>
           </div>
         </div>
 
@@ -273,7 +244,6 @@ function App() {
               <span className="dot" />
             </div>
           )}
-          <div ref={chatEndRef} />
         </div>
 
         {errorText ? <div className="error-banner">{errorText}</div> : null}

@@ -22,7 +22,6 @@ Miko 是基於 **Wails + Go + React** 的桌上型語音智能助理。
 補充：
 
 - OpenAI 使用官方 `openai-go/v3`
-- 不支援任何本地 STT、LLM、TTS 模型
 
 ## 語音互動流程
 
@@ -38,9 +37,7 @@ Miko 是基於 **Wails + Go + React** 的桌上型語音智能助理。
 
 ## 前後端通訊
 
-Miko 不使用 FastAPI WebSocket。
-
-改用 Wails 提供的兩種通道：
+Wails 提供的兩種通道：
 
 - **Method binding**
   - `StartListening()`

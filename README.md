@@ -15,7 +15,6 @@ Miko 是一個基於 Wails 的桌上型語音智能助理。使用者可以直�
 ## 專案重點
 
 - 只支援雲端 `deepgram`、`openai`、`cartesia`
-- 不支援任何本地 STT、LLM、TTS 模型
 - OpenAI 整合使用官方 Go SDK `github.com/openai/openai-go/v3`
 - 前端不直接錄音、不直接播放 TTS 音訊
 - 前後端透過 Wails method binding + Wails events 溝通，不使用 WebSocket
