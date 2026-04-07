@@ -1,43 +1,61 @@
 # Miko
 
-Miko 是一個基於 Wails 的桌上型語音智能助理。使用者可以直接用語音與助理交談，並在介面中看到 VRM bust view Avatar。
+Miko 是一個桌上型語音智能助理。UI 維持 React + Three.js + VRM，桌面殼使用 Wails，語音與 AI 後端由 Python sidecar 提供。
 
-技術堆疊：
+## 目標架構
 
-- 後端：Go
-- 桌面框架：Wails
+- 桌面殼：Go + Wails
 - 前端：TypeScript + React + Three.js + `@pixiv/three-vrm`
-- 雲端服務：
-  - STT：Deepgram
-  - LLM：OpenAI
-  - TTS：Cartesia
+- AI / CV 後端：Python 3.12
+- 後端通訊：gRPC over Unix socket
+- Python 套件管理：`uv`
 
-## 專案重點
+## 核心設計
 
-- 只支援雲端 `deepgram`、`openai`、`cartesia`
-- OpenAI 整合使用官方 Go SDK `github.com/openai/openai-go/v3`
-- 前端不直接錄音、不直接播放 TTS 音訊
-- 前後端透過 Wails method binding + Wails events 溝通，不使用 WebSocket
-- 預設 VRM 模型為 [frontend/public/vrm/Yuna.vrm](/Users/andrew/projects/miko/frontend/public/vrm/Yuna.vrm)
-- 其他 VRM 素材也統一放在 [frontend/public/vrm](/Users/andrew/projects/miko/frontend/public/vrm)
+- Go 負責：
+  - 建立 macOS / Linux 桌面執行檔
+  - 啟動與監控 Python backend sidecar
+  - 本機麥克風收音
+  - 本機喇叭播放
+  - 將 backend 事件轉發給前端
+  - 播放 Python sidecar 回傳的 TTS PCM
+- Python backend 負責：
+  - OpenCV 人臉偵測
+  - STT
+  - LLM
+  - TTS
+  - 對話流程管理
+- 前端負責：
+  - VRM Avatar 渲染
+  - 聊天紀錄
+  - 字幕
+  - API ready / missing 狀態
+  - listening / thinking / speaking 等 UI 狀態
 
-## 目錄
+## 通訊方式
+
+- Frontend <-> Go：Wails method bindings + Wails events
+- Go <-> Python backend：gRPC over Unix socket
+
+Python sidecar 的 IPC 固定使用 Unix socket。
+
+建議的 Python sidecar 啟動方式：
+
+- 開發模式：Go 啟動 `uv run python -m app.server`
+- 發佈模式：Go 啟動隨應用程式一起分發的 Python backend sidecar
+
+## 目錄方向
 
 ```text
 miko/
-  app.go
   main.go
+  app.go
   internal/
-    assistant/
     audio/
-    avatar/
+    backendclient/
     config/
     debuglog/
-    services/
-      brain/
-      llm/
-      stt/
-      tts/
+    runtime/
   frontend/
     public/
       vrm/
@@ -47,20 +65,50 @@ miko/
       App.tsx
       App.css
       avatar/
+  proto/
+    assistant.proto
+  backend/
+    pyproject.toml
+    uv.lock
+    app/
+      server.py
+      config.py
+      pipeline/
+      services/
+        vision/
+        stt/
+        llm/
+        tts/
   config_files/
     config.yaml.example
 ```
 
+## 後端服務邊界
+
+Python backend 的服務目標：
+
+- `vision`
+  - 使用 OpenCV
+  - 只做 face center 偵測
+- `stt`
+  - Deepgram
+  - 目前由 sidecar 先做分段，再送雲端辨識
+- `llm`
+  - OpenAI
+- `tts`
+  - Cartesia
+
+Go 端保留音訊 I/O，不把麥克風與喇叭控制移到 Python。Go 本身不再提供 STT / LLM / TTS 實作。
+
 ## 設定
 
-1. 建立使用者設定檔
+使用者設定檔位於：
 
-```bash
-mkdir -p ~/.miko
-cp config_files/config.yaml.example ~/.miko/config.yaml
+```text
+~/.miko/config.yaml
 ```
 
-2. 在 `~/.miko/config.yaml` 填入 API keys
+API key 只從這個檔案讀取：
 
 ```yaml
 api_keys:
@@ -69,81 +117,70 @@ api_keys:
   cartesia: YOUR_CARTESIA_API_KEY
 ```
 
-API key 只從 `~/.miko/config.yaml` 讀取，不從 `.env` 讀取。
-
-## Workspace
-
 Miko 啟動時會自動確認並建立：
 
 ```text
 ~/.miko/workspace/
+~/.miko/workspace/logs/
 ```
 
-目前 workspace 主要用於：
-
-- `~/.miko/workspace/logs/`
-
 ## 開發
+
+Go / Wails：
 
 ```bash
 wails dev
 ```
 
-Wails 會啟動 Go 後端與前端開發環境。
-
-如需先安裝前端依賴：
+前端：
 
 ```bash
 cd frontend
 npm install
+npm run build
+```
+
+Python backend：
+
+```bash
+cd backend
+uv sync
+uv run python -m app.server
 ```
 
 ## 建置
+
+Go 的責任是產出桌面殼與整合 sidecar 的應用程式：
 
 ```bash
 wails build
 ```
 
+未來正式發佈時，會採用：
+
+- Go / Wails 主程式
+- Python backend sidecar
+- sidecar 隨應用程式一同分發
+
 ## Debug Log
 
-後端會自動把 debug log 寫到：
+應用程式 log 會寫到：
 
 ```text
 ~/.miko/workspace/logs/
 ```
 
-系統只保留最近 5 天的 `miko-YYYY-MM-DD.log`，啟動時會自動清理更舊的檔案。
+系統只保留最近 5 天的 `miko-YYYY-MM-DD.log`。
 
-目前會記錄：
+目前同一份 log 會包含：
 
-- app startup / shutdown
-- 每次對話的 session id
-- Deepgram 連線、KeepAlive、斷句與重連
-- OpenAI 請求耗時
-- Cartesia 請求耗時與回傳大小
-- 音訊播放 backend 與播放錯誤
+- Go / Wails shell log
+- Python sidecar stdout / stderr
+- sidecar 的 STT / LLM / TTS 關鍵事件與耗時
 
-log 不會寫入 API key。
-
-## 執行模型
-
-- 後端負責：
-  - 本機麥克風收音
-  - 本機喇叭播放
-  - Deepgram STT
-  - OpenAI LLM
-  - Cartesia TTS
-  - Avatar motion frame 生成
-- 前端負責：
-  - VRM 渲染
-  - chat UI
-  - 字幕
-  - listening / thinking / VAD 狀態
-  - 右側聊天面板內部捲動
-
-## 平台支援
+## 平台目標
 
 - macOS
-- Linux ARM64，例如 Raspberry Pi
+- Linux
 
-音訊 I/O 使用 Go 的本機音訊裝置層，實際部署時仍需目標系統提供可用的輸入與輸出裝置。
+其中 Linux 目標包含 Linux ARM64，例如 Raspberry Pi。

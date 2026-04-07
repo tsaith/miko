@@ -6,6 +6,10 @@ frontend/dist
 frontend/wailsjs/*
 frontend/package.json.md5
 .gocache/
+backend/.venv/
+backend/app/generated/
+.DS_Store
+**/__pycache__
 
 # VRM models
 frontend/public/vrm/*

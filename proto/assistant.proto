@@ -1,0 +1,115 @@
+syntax = "proto3";
+
+package miko.backend.v1;
+
+option go_package = "miko/internal/backendclient/proto;backendproto";
+
+service HealthService {
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+service ConversationService {
+  rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
+  rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
+  rpc StreamAudio(stream AudioChunk) returns (Ack);
+  rpc StreamEvents(StreamEventsRequest) returns (stream BackendEvent);
+}
+
+service VisionService {
+  rpc StartVision(StartVisionRequest) returns (Ack);
+  rpc StopVision(StopVisionRequest) returns (Ack);
+}
+
+message PingRequest {}
+
+message PingResponse {
+  string service = 1;
+  string version = 2;
+  string status = 3;
+}
+
+message StartSessionRequest {
+  string session_id = 1;
+}
+
+message StartSessionResponse {
+  string session_id = 1;
+  string status = 2;
+}
+
+message StopSessionRequest {
+  string session_id = 1;
+}
+
+message StopSessionResponse {
+  string session_id = 1;
+  string status = 2;
+}
+
+message StreamEventsRequest {
+  string session_id = 1;
+}
+
+message StartVisionRequest {}
+
+message StopVisionRequest {}
+
+message Ack {
+  bool ok = 1;
+  string message = 2;
+}
+
+message AudioChunk {
+  string session_id = 1;
+  bytes pcm_s16le = 2;
+  uint32 sample_rate = 3;
+  uint32 channels = 4;
+}
+
+message BackendEvent {
+  string session_id = 1;
+  oneof payload {
+    TranscriptEvent transcript = 10;
+    ChatEvent chat = 11;
+    TtsChunkEvent tts_chunk = 12;
+    TtsLifecycleEvent tts_lifecycle = 13;
+    FaceTargetEvent face_target = 14;
+    AvatarMotionEvent avatar_motion = 15;
+    ErrorEvent error = 16;
+  }
+}
+
+message TranscriptEvent {
+  string kind = 1;
+  string text = 2;
+}
+
+message ChatEvent {
+  string role = 1;
+  string content = 2;
+  string status = 3;
+}
+
+message TtsChunkEvent {
+  bytes pcm_s16le = 1;
+  uint32 sample_rate = 2;
+  uint32 channels = 3;
+}
+
+message TtsLifecycleEvent {
+  string state = 1;
+}
+
+message FaceTargetEvent {
+  bool present = 1;
+  float x = 2;
+  float y = 3;
+}
+
+message AvatarMotionEvent {
+  string json = 1;
+}
+
+message ErrorEvent {
+  string message = 1;
+}

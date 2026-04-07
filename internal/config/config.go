@@ -27,6 +27,7 @@ type Settings struct {
 
 type Config struct {
 	APIKeys APIKeysConfig `yaml:"api_keys" json:"-"`
+	Backend BackendConfig `yaml:"backend" json:"backend"`
 	LLM     LLMConfig     `yaml:"llm" json:"llm"`
 	STT     STTConfig     `yaml:"stt" json:"stt"`
 	TTS     TTSConfig     `yaml:"tts" json:"tts"`
@@ -36,6 +37,13 @@ type APIKeysConfig struct {
 	OpenAI   string `yaml:"openai" json:"-"`
 	Deepgram string `yaml:"deepgram" json:"-"`
 	Cartesia string `yaml:"cartesia" json:"-"`
+}
+
+type BackendConfig struct {
+	Enabled      bool   `yaml:"enabled" json:"enabled"`
+	SocketPath   string `yaml:"socket_path" json:"socket_path"`
+	LaunchMode   string `yaml:"launch_mode" json:"launch_mode"`
+	PythonModule string `yaml:"python_module" json:"python_module"`
 }
 
 type LLMConfig struct {
@@ -87,6 +95,12 @@ func DefaultSettings() Settings {
 
 func DefaultConfig() Config {
 	return Config{
+		Backend: BackendConfig{
+			Enabled:      false,
+			SocketPath:   "",
+			LaunchMode:   "auto",
+			PythonModule: "app.server",
+		},
 		LLM: LLMConfig{
 			Engine: "openai",
 			OpenAI: OpenAIConfig{
@@ -167,6 +181,11 @@ func (c Config) Validate() error {
 	if c.LLM.Engine != "openai" {
 		return fmt.Errorf("unsupported llm.engine %q", c.LLM.Engine)
 	}
+	switch c.Backend.LaunchMode {
+	case "", "auto", "uv", "binary":
+	default:
+		return fmt.Errorf("unsupported backend.launch_mode %q", c.Backend.LaunchMode)
+	}
 	if c.STT.Engine != "deepgram" {
 		return fmt.Errorf("unsupported stt.engine %q", c.STT.Engine)
 	}
@@ -175,6 +194,12 @@ func (c Config) Validate() error {
 	}
 	if c.LLM.OpenAI.Model == "" {
 		c.LLM.OpenAI.Model = DefaultOpenAIModel
+	}
+	if c.Backend.LaunchMode == "" {
+		c.Backend.LaunchMode = "auto"
+	}
+	if c.Backend.PythonModule == "" {
+		c.Backend.PythonModule = "app.server"
 	}
 	if c.TTS.Cartesia.VoiceID == "" {
 		c.TTS.Cartesia.VoiceID = DefaultCartesiaVoiceID

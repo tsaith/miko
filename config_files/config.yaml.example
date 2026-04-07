@@ -12,6 +12,12 @@ api_keys:
   deepgram: YOUR_DEEPGRAM_API_KEY
   cartesia: YOUR_CARTESIA_API_KEY
 
+backend:
+  enabled: false
+  socket_path: ""
+  launch_mode: auto
+  python_module: app.server
+
 llm:
   engine: openai
   openai:

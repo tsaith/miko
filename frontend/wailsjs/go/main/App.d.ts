@@ -4,6 +4,8 @@ import {config} from '../models';
 
 export function GetRuntimeState():Promise<config.RuntimeState>;
 
+export function PingBackend():Promise<config.BackendStatus>;
+
 export function StartListening():Promise<void>;
 
 export function StopListening():Promise<void>;

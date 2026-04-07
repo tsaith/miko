@@ -23,7 +23,27 @@ interface RuntimeState {
   config_path: string;
   log_path: string;
   log_directory: string;
+  backend: {
+    enabled: boolean;
+    running: boolean;
+    mode: string;
+    transport: string;
+    endpoint: string;
+    service: string;
+    version: string;
+    status: string;
+    last_error: string;
+  };
   config: {
+    backend: {
+      enabled: boolean;
+      transport: string;
+      host: string;
+      port: number;
+      socket_path: string;
+      launch_mode: string;
+      python_module: string;
+    };
     llm: {
       openai: {
         model: string;
@@ -65,9 +85,30 @@ function App() {
   const avatarManagerRef = useRef<AvatarManager | null>(null);
 
   useEffect(() => {
-    GetRuntimeState()
-      .then(setState)
-      .catch((err) => setErrorText(String(err)));
+    let cancelled = false;
+
+    const refreshState = async () => {
+      try {
+        const nextState = await GetRuntimeState();
+        if (!cancelled) {
+          setState(nextState as unknown as RuntimeState);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setErrorText(String(err));
+        }
+      }
+    };
+
+    void refreshState();
+    const timer = window.setInterval(() => {
+      void refreshState();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -182,6 +223,18 @@ function App() {
       state?.providers?.deepgram_configured &&
       state?.providers?.cartesia_configured,
   );
+  const backendEnabled = Boolean(state?.backend?.enabled);
+  const backendReady = Boolean(state?.backend?.enabled && state?.backend?.running);
+  const backendTransport = state?.backend?.transport || state?.config?.backend?.transport || 'auto';
+  const backendEndpoint = state?.backend?.endpoint || 'n/a';
+  const backendLabel = !backendEnabled
+    ? 'Sidecar Disabled'
+    : backendReady
+      ? `Sidecar ${state?.backend?.status || 'Ready'}`
+      : 'Sidecar Offline';
+  const backendDetail = backendReady
+    ? [state?.backend?.service, state?.backend?.version, backendTransport].filter(Boolean).join(' • ')
+    : state?.backend?.last_error || `${backendTransport} • ${backendEndpoint}`;
 
   const toggleListening = async () => {
     setErrorText('');
@@ -219,6 +272,11 @@ function App() {
           <div className={`pill ${providersReady ? 'ready' : 'warning'}`}>
             {providersReady ? 'API Ready' : 'API Missing'}
           </div>
+        </div>
+
+        <div className={`backend-status ${backendReady ? 'ready' : backendEnabled ? 'warning' : 'idle'}`}>
+          <div className="backend-status-label">{backendLabel}</div>
+          <div className="backend-status-detail">{backendDetail}</div>
         </div>
 
         <div ref={chatContainerRef} className="chat-container">

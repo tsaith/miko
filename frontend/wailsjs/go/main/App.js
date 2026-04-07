@@ -6,6 +6,10 @@ export function GetRuntimeState() {
   return window['go']['main']['App']['GetRuntimeState']();
 }
 
+export function PingBackend() {
+  return window['go']['main']['App']['PingBackend']();
+}
+
 export function StartListening() {
   return window['go']['main']['App']['StartListening']();
 }

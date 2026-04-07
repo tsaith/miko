@@ -11,13 +11,9 @@ import (
 
 	"miko/internal/audio"
 	"miko/internal/avatar"
+	"miko/internal/backendclient"
 	"miko/internal/config"
 	"miko/internal/debuglog"
-	"miko/internal/detection"
-	"miko/internal/services/brain"
-	"miko/internal/services/llm"
-	"miko/internal/services/stt"
-	"miko/internal/services/tts"
 )
 
 type EventEmitter func(event string, payload any)
@@ -28,13 +24,10 @@ type Service struct {
 	configPath string
 	emit       EventEmitter
 
-	audio  *audio.Service
-	stt    *stt.DeepgramService
-	brain  *brain.Service
-	tts    *tts.CartesiaService
-	motion *avatar.MotionController
-	face   *detection.Service
-	logger *debuglog.Logger
+	backend *backendclient.Manager
+	audio   *audio.Service
+	motion  *avatar.MotionController
+	logger  *debuglog.Logger
 
 	mu                sync.Mutex
 	sessionCtx        context.Context
@@ -45,14 +38,14 @@ type Service struct {
 	isProcessing      bool
 	assistantSpeaking bool
 	lastSpeechState   bool
-	reconnectingSTT   bool
+	pendingTTS        []byte
 	closed            bool
 
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 }
 
-func NewService(settings config.Settings, cfg config.Config, cfgPath string, emit EventEmitter, logger *debuglog.Logger) (*Service, error) {
+func NewService(settings config.Settings, cfg config.Config, cfgPath string, backend *backendclient.Manager, emit EventEmitter, logger *debuglog.Logger) (*Service, error) {
 	audioService, err := audio.NewService(logger)
 	if err != nil {
 		return nil, err
@@ -63,12 +56,10 @@ func NewService(settings config.Settings, cfg config.Config, cfgPath string, emi
 		settings:   settings,
 		config:     cfg,
 		configPath: cfgPath,
+		backend:    backend,
 		emit:       emit,
 		logger:     logger,
 		audio:      audioService,
-		stt:        stt.NewDeepgramService(cfg.APIKeys.Deepgram, cfg.STT.Deepgram, logger),
-		brain:      brain.NewService(llm.NewOpenAIService(cfg.APIKeys.OpenAI, cfg.LLM.OpenAI, logger), logger),
-		tts:        tts.NewCartesiaService(cfg.APIKeys.Cartesia, cfg.TTS.Cartesia, logger),
 		motion:     avatar.NewMotionController(),
 		rootCtx:    rootCtx,
 		rootCancel: rootCancel,
@@ -76,7 +67,6 @@ func NewService(settings config.Settings, cfg config.Config, cfgPath string, emi
 
 	logger.Infof("assistant", "service initialized config=%s", cfgPath)
 	go service.motionLoop(rootCtx)
-	service.startFaceDetection(rootCtx)
 	return service, nil
 }
 
@@ -88,6 +78,7 @@ func (s *Service) Close() {
 	}
 	s.closed = true
 	cancel := s.sessionCancel
+	sessionID := s.sessionID
 	s.sessionCancel = nil
 	s.mu.Unlock()
 
@@ -95,12 +86,12 @@ func (s *Service) Close() {
 		cancel()
 	}
 	s.logger.Info("assistant", "service closing")
-	s.stt.Finish()
+	if s.backend != nil {
+		_ = s.backend.StopConversation(sessionID)
+	}
+	s.audio.StopPlayback()
 	s.audio.StopCapture()
 	s.audio.Close()
-	if s.face != nil {
-		s.face.Close()
-	}
 	s.rootCancel()
 }
 
@@ -145,20 +136,30 @@ func (s *Service) StartListening() error {
 	s.isProcessing = false
 	s.assistantSpeaking = false
 	s.lastSpeechState = false
+	s.pendingTTS = nil
 	s.motion.Reset()
-	s.brain.Reset()
 	s.mu.Unlock()
 	s.logger.SessionInfof(sessionID, "assistant", "start listening")
 
-	if err := s.connectSTT(sessionCtx, sessionID); err != nil {
-		s.logger.SessionErrorf(sessionID, "assistant", "stt connect failed: %v", err)
+	if s.backend == nil || !s.backend.Status().Running {
+		s.resetSession()
+		return errors.New("python backend sidecar is not ready")
+	}
+	if err := s.backend.StartConversation(sessionCtx, sessionID, backendclient.ConversationCallbacks{
+		OnTranscript:   s.handleTranscriptEvent,
+		OnChat:         s.handleChatEvent,
+		OnTTSLifecycle: s.handleTTSLifecycle,
+		OnTTSChunk:     s.handleTTSChunk,
+		OnError:        s.handleConversationError,
+	}); err != nil {
+		s.logger.SessionErrorf(sessionID, "assistant", "backend conversation start failed: %v", err)
 		s.resetSession()
 		return err
 	}
 
 	go s.sendLoop(sessionCtx, s.sendQueue)
 	if err := s.audio.StartCapture(s.handleCaptureChunk); err != nil {
-		s.stt.Finish()
+		_ = s.backend.StopConversation(sessionID)
 		s.resetSession()
 		return err
 	}
@@ -184,7 +185,9 @@ func (s *Service) StopListening() error {
 	s.logger.SessionInfof(sessionID, "assistant", "stop listening")
 	s.audio.StopPlayback()
 	s.audio.StopCapture()
-	s.stt.Finish()
+	if s.backend != nil {
+		_ = s.backend.StopConversation(sessionID)
+	}
 	s.motion.SetAudioLevel(0)
 	s.resetSession()
 
@@ -229,77 +232,98 @@ func (s *Service) sendLoop(ctx context.Context, sendQueue <-chan []byte) {
 			if !ok {
 				return
 			}
-			_ = s.stt.SendAudio(s.currentSessionID(), chunk)
+			if s.backend != nil {
+				if err := s.backend.SendAudio(s.currentSessionID(), chunk); err != nil && ctx.Err() == nil {
+					s.logger.SessionWarnf(s.currentSessionID(), "assistant", "send audio to backend failed: %v", err)
+				}
+			}
 		}
 	}
 }
 
-func (s *Service) handleUtterance(text string) {
+func (s *Service) handleTranscriptEvent(kind string, text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
 	}
-
-	if !s.beginProcessing() {
-		return
+	if kind == "final" {
+		s.setProcessing(true)
 	}
-	defer s.endProcessing()
+}
 
-	ctx := s.currentSessionContext()
-	sessionID := s.currentSessionID()
-	if ctx == nil {
-		return
-	}
-	s.logger.SessionInfof(sessionID, "assistant", "utterance received chars=%d", len([]rune(text)))
-
-	s.emit("chat_update", map[string]string{
-		"role":    "user",
-		"content": text,
-	})
-	s.emit("chat_status", map[string]string{"status": "thinking"})
-
-	reply, err := s.brain.ProcessMessage(ctx, sessionID, text)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-			s.emit("chat_status", map[string]string{"status": "idle"})
-			return
-		}
+func (s *Service) handleChatEvent(role string, content string, status string) {
+	content = strings.TrimSpace(content)
+	if role != "" && content != "" {
 		s.emit("chat_update", map[string]string{
-			"role":    "assistant",
-			"content": "抱歉，我剛剛連不上雲端服務，請稍後再試。",
+			"role":    role,
+			"content": content,
 		})
-		s.emit("chat_status", map[string]string{"status": "idle"})
-		return
 	}
-
-	s.emit("chat_update", map[string]string{
-		"role":    "assistant",
-		"content": reply,
-	})
-
-	audioData, err := s.tts.Synthesize(ctx, sessionID, reply)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-			s.emit("chat_status", map[string]string{"status": "idle"})
-			return
+	if status != "" {
+		if status == "thinking" {
+			s.setProcessing(true)
 		}
-		s.emitError(fmt.Sprintf("TTS 生成失敗：%v", err))
-		s.emit("chat_status", map[string]string{"status": "idle"})
+		if status == "idle" && !s.isCurrentlySpeaking() {
+			s.setProcessing(false)
+		}
+		s.emit("chat_status", map[string]string{"status": status})
+	}
+}
+
+func (s *Service) handleTTSLifecycle(state string) {
+	switch strings.TrimSpace(state) {
+	case "start":
+		s.mu.Lock()
+		s.pendingTTS = nil
+		s.assistantSpeaking = true
+		s.mu.Unlock()
+		s.emit("tts_start", map[string]any{})
+	case "end":
+		audioData := s.consumePendingTTS()
+		go s.playBackendAudio(audioData)
+	}
+}
+
+func (s *Service) handleTTSChunk(pcm []byte, _ uint32, _ uint32) {
+	if len(pcm) == 0 {
+		return
+	}
+	s.mu.Lock()
+	s.pendingTTS = append(s.pendingTTS, pcm...)
+	s.mu.Unlock()
+}
+
+func (s *Service) playBackendAudio(pcm []byte) {
+	sessionID := s.currentSessionID()
+	if len(pcm) == 0 {
+		s.finishPlayback(nil)
 		return
 	}
 
-	s.setAssistantSpeaking(true)
-	s.emit("tts_start", map[string]any{})
-	playErr := s.audio.PlayPCM(sessionID, audioData, func(level float64) {
+	err := s.audio.PlayPCM(sessionID, pcm, func(level float64) {
 		s.motion.SetAudioLevel(level)
 	})
+	s.finishPlayback(err)
+}
+
+func (s *Service) finishPlayback(playErr error) {
 	s.motion.SetAudioLevel(0)
-	s.emit("tts_end", map[string]any{})
 	s.setAssistantSpeaking(false)
-	if playErr != nil && !errors.Is(playErr, context.Canceled) && ctx.Err() == nil {
+	s.setProcessing(false)
+	s.emit("tts_end", map[string]any{})
+	s.emit("chat_status", map[string]string{"status": "idle"})
+
+	if playErr != nil && !errors.Is(playErr, context.Canceled) {
 		s.emitError(fmt.Sprintf("語音播放失敗：%v", playErr))
 	}
-	s.emit("chat_status", map[string]string{"status": "idle"})
+}
+
+func (s *Service) consumePendingTTS() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	audioData := append([]byte(nil), s.pendingTTS...)
+	s.pendingTTS = nil
+	return audioData
 }
 
 func (s *Service) motionLoop(ctx context.Context) {
@@ -339,26 +363,22 @@ func (s *Service) ensureConfigured() error {
 	return fmt.Errorf("missing required fields in ~/.miko/config.yaml: %s", strings.Join(missing, ", "))
 }
 
-func (s *Service) beginProcessing() bool {
+func (s *Service) setProcessing(value bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.isListening || s.isProcessing || s.assistantSpeaking {
-		return false
-	}
-	s.isProcessing = true
-	return true
-}
-
-func (s *Service) endProcessing() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.isProcessing = false
+	s.isProcessing = value
 }
 
 func (s *Service) setAssistantSpeaking(value bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.assistantSpeaking = value
+}
+
+func (s *Service) isCurrentlySpeaking() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.assistantSpeaking
 }
 
 func (s *Service) currentSessionContext() context.Context {
@@ -385,7 +405,7 @@ func (s *Service) resetSession() {
 	s.isProcessing = false
 	s.assistantSpeaking = false
 	s.lastSpeechState = false
-	s.reconnectingSTT = false
+	s.pendingTTS = nil
 }
 
 func (s *Service) emitError(message string) {
@@ -395,6 +415,23 @@ func (s *Service) emitError(message string) {
 	sessionID := s.currentSessionID()
 	s.logger.SessionErrorf(sessionID, "assistant", "%s", message)
 	s.emit("app_error", map[string]string{"message": message})
+}
+
+func (s *Service) handleConversationError(err error) {
+	if err == nil {
+		return
+	}
+	if ctx := s.currentSessionContext(); ctx != nil && ctx.Err() != nil {
+		return
+	}
+	s.setProcessing(false)
+	s.setAssistantSpeaking(false)
+	s.emit("chat_status", map[string]string{"status": "idle"})
+	s.emitError(fmt.Sprintf("語音服務中斷：%v", err))
+}
+
+func (s *Service) SetFaceTarget(x float64, y float64, present bool) {
+	s.motion.SetFaceTarget(x, y, present)
 }
 
 func newSessionID() string {
@@ -413,74 +450,4 @@ func loggerDir(logger *debuglog.Logger) string {
 		return ""
 	}
 	return logger.Directory()
-}
-
-func (s *Service) startFaceDetection(ctx context.Context) {
-	faceService, err := detection.NewService(s.logger)
-	if err != nil {
-		s.logger.Warnf("assistant", "face detection unavailable: %v", err)
-		return
-	}
-	if err := faceService.Start(ctx, func(obs detection.Observation) {
-		s.motion.SetFaceTarget(obs.X, obs.Y, obs.Present)
-	}); err != nil {
-		s.logger.Warnf("assistant", "face detection start failed: %v", err)
-		faceService.Close()
-		return
-	}
-	s.face = faceService
-	s.logger.Info("assistant", "face detection started")
-}
-
-func (s *Service) connectSTT(ctx context.Context, sessionID string) error {
-	return s.stt.Connect(ctx, sessionID, func(text string) {
-		go s.handleUtterance(text)
-	}, func(err error) {
-		go s.handleSTTDisconnect(sessionID, err)
-	})
-}
-
-func (s *Service) handleSTTDisconnect(sessionID string, cause error) {
-	if cause == nil {
-		return
-	}
-
-	s.mu.Lock()
-	if s.closed || !s.isListening || s.sessionID != sessionID || s.sessionCtx == nil || s.sessionCtx.Err() != nil {
-		s.mu.Unlock()
-		return
-	}
-	if s.reconnectingSTT {
-		s.mu.Unlock()
-		return
-	}
-	s.reconnectingSTT = true
-	ctx := s.sessionCtx
-	s.mu.Unlock()
-
-	defer func() {
-		s.mu.Lock()
-		if s.sessionID == sessionID {
-			s.reconnectingSTT = false
-		}
-		s.mu.Unlock()
-	}()
-
-	s.logger.SessionWarnf(sessionID, "assistant", "stt disconnected, reconnecting: %v", cause)
-	for attempt := 1; attempt <= 3; attempt++ {
-		if ctx.Err() != nil {
-			return
-		}
-		if attempt > 1 {
-			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
-		}
-		if err := s.connectSTT(ctx, sessionID); err == nil {
-			s.logger.SessionInfof(sessionID, "assistant", "stt reconnected attempt=%d", attempt)
-			return
-		} else {
-			s.logger.SessionWarnf(sessionID, "assistant", "stt reconnect failed attempt=%d err=%v", attempt, err)
-		}
-	}
-
-	s.emitError("語音辨識連線中斷，請停止交談後重新開始。")
 }

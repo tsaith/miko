@@ -1,165 +1,193 @@
 # Miko Agent Architecture
 
-這份文件描述 Miko 專案目前的桌面助理架構、語音管線與前後端責任切分。
+這份文件描述 Miko 專案的目標架構與模組責任切分。
 
-## 整體架構
+## 整體方向
 
-Miko 是基於 **Wails + Go + React** 的桌上型語音智能助理。
+Miko 採用雙程序桌面架構：
 
-- **後端 (Go)**：負責本機麥克風收音、喇叭播放、雲端 STT / LLM / TTS 呼叫、Avatar motion runtime
-- **前端 (React / Three.js / VRM)**：負責 UI 呈現、VRM bust view 渲染、聊天紀錄、字幕與狀態顯示
+- **Go + Wails shell**
+  - 建立桌面視窗
+  - 管理前端
+  - 控制本機音訊裝置
+  - 啟動與監控 Python backend sidecar
+  - 透過 Unix socket 上的 gRPC 與 sidecar 通訊
+- **Python backend sidecar**
+  - 使用 Python 3.12
+  - 使用 `uv` 管理套件
+  - 提供電腦視覺、STT、LLM、TTS、motion planning 等服務
+- **React / Three.js / VRM frontend**
+  - 顯示 VRM bust view
+  - 顯示聊天紀錄與字幕
+  - 顯示 listening / thinking / speaking 狀態
 
-前端不直接使用瀏覽器麥克風 API，也不直接播放 TTS 音訊。
+## 責任切分
 
-## 支援的服務
+### Go shell
 
-本專案只支援以下雲端服務：
+Go 端負責：
 
-- **Deepgram STT**
-- **OpenAI LLM**
-- **Cartesia TTS**
+- Wails app lifecycle
+- 前端事件橋接
+- 本機麥克風收音
+- 本機喇叭播放
+- 啟動 / 停止 Python backend
+- gRPC client
+- 將 backend 回傳的狀態轉成前端可消費的 Wails events
+- 播放 sidecar 回傳的 TTS PCM
+- 打包成可在 macOS / Linux 執行的桌面應用程式
 
-補充：
+音訊裝置必須留在 Go，不交給 Python。
+Go 端不再提供 STT / LLM / TTS 的主流程。
 
-- OpenAI 使用官方 `openai-go/v3`
+### Python backend
 
-## 語音互動流程
+Python backend 放在 `backend/`，使用：
 
-1. 後端啟動本機麥克風收音
-2. 音訊以 `16kHz / mono / Int16 PCM` 送往 Deepgram live transcription
-3. 後端以簡單 RMS 門檻回推 `vad_status`，供前端顯示說話狀態
-4. Deepgram 連線會定期送 KeepAlive，若意外中斷會嘗試自動重連
-5. Deepgram 回傳完整語句後，後端送入 OpenAI 產生回覆
-6. 後端先推送 `chat_update` 與 `chat_status`
-7. 回覆文字送往 Cartesia 產生 PCM
-8. 後端直接播放 PCM 到本機喇叭
-9. 後端依播放中的音量更新嘴型，並持續推送 `avatar_motion`
+- Python 3.12
+- `uv`
+- `grpcio`
+- `opencv-python`
+- `openai`
+- `deepgram`
+- `cartesia`
 
-## 前後端通訊
+Python 端負責：
 
-Wails 提供的兩種通道：
+- OpenCV face center 偵測
+- STT
+- LLM
+- TTS
+- 對話狀態管理
+- face target 資料生成
 
-- **Method binding**
-  - `StartListening()`
-  - `StopListening()`
-  - `GetRuntimeState()`
-- **Wails events**
-  - `listening_state`
-  - `vad_status`
-  - `chat_update`
-  - `chat_status`
-  - `tts_start`
-  - `tts_end`
-  - `avatar_motion`
-  - `app_error`
+### Frontend
 
-## 後端模組
+前端維持：
 
-### 入口
+- React
+- Three.js
+- `@pixiv/three-vrm`
 
-- [main.go](/Users/andrew/projects/miko/main.go)
-- [app.go](/Users/andrew/projects/miko/app.go)
+前端不直接碰麥克風與喇叭裝置。
 
-### Orchestration
+## 通訊模型
 
-- [internal/assistant/service.go](/Users/andrew/projects/miko/internal/assistant/service.go)
+### Frontend <-> Go
 
-負責串接：
+透過 Wails methods + events：
 
-- 麥克風收音
-- Deepgram STT
-- OpenAI LLM
-- Cartesia TTS
-- Avatar motion events
+- `StartListening()`
+- `StopListening()`
+- `GetRuntimeState()`
 
-### 設定與 Workspace
+事件包含：
 
-- [internal/config/config.go](/Users/andrew/projects/miko/internal/config/config.go)
-- [internal/config/runtime.go](/Users/andrew/projects/miko/internal/config/runtime.go)
+- `listening_state`
+- `vad_status`
+- `chat_update`
+- `chat_status`
+- `tts_start`
+- `tts_end`
+- `avatar_motion`
+- `app_error`
 
-來源：
+### Go <-> Python backend
+
+透過 Unix socket 上的 gRPC。
+
+建議的 proto 方向：
+
+- `HealthService`
+- `ConversationService`
+- `VisionService`
+
+建議的事件流內容：
+
+- transcript partial / final
+- chat update
+- tts audio chunk
+- tts lifecycle
+- face target
+- avatar motion
+- app error
+
+## 建議目錄
+
+```text
+miko/
+  main.go
+  app.go
+  internal/
+    audio/
+    backendclient/
+    config/
+    debuglog/
+    runtime/
+  frontend/
+  proto/
+    assistant.proto
+  backend/
+    pyproject.toml
+    uv.lock
+    app/
+      server.py
+      config.py
+      pipeline/
+      services/
+        vision/
+        stt/
+        llm/
+        tts/
+```
+
+## 模型與 UI
+
+- 預設 VRM 模型：
+  - [frontend/public/vrm/Yuna.vrm](/Users/andrew/projects/miko/frontend/public/vrm/Yuna.vrm)
+- 其他 VRM 素材：
+  - [frontend/public/vrm/Yuki.vrm](/Users/andrew/projects/miko/frontend/public/vrm/Yuki.vrm)
+
+目前 UI 的方向：
+
+- 左側：Avatar bust view
+- 右側：聊天紀錄與交談控制
+- 保留 API ready / missing 狀態
+
+## 設定與 Workspace
+
+使用者設定檔：
 
 - `~/.miko/config.yaml`
 
 Workspace：
 
-- `~/.miko/workspace/` 會在啟動時自動建立
-- log 會寫到 `~/.miko/workspace/logs/`
+- `~/.miko/workspace/`
+- `~/.miko/workspace/logs/`
 
-API keys 只放在 `~/.miko/config.yaml` 的 `api_keys` 區塊，且不會回傳到前端。
+API keys 存放在 `~/.miko/config.yaml` 的 `api_keys` 區塊。
 
-### Debug Log
+## Log 現況
 
-- [internal/debuglog/logger.go](/Users/andrew/projects/miko/internal/debuglog/logger.go)
+目前 runtime log 會統一寫到 `~/.miko/workspace/logs/`。
 
-特性：
+內容包含：
 
-- 自動每日切 log
-- 只保留最近 5 天
-- 記錄 session id
-- 記錄 STT / LLM / TTS / audio playback 生命週期
+- Go shell / Wails / audio / avatar log
+- Python sidecar stdout / stderr
+- sidecar 的 STT / LLM / TTS 關鍵事件與耗時
 
-### 音訊 I/O
+## 發佈策略
 
-- [internal/audio/service.go](/Users/andrew/projects/miko/internal/audio/service.go)
+正式發佈時採用 sidecar 形式：
 
-負責：
+- Go / Wails 主程式
+- Python backend sidecar
 
-- 啟動本機麥克風
-- 播放 TTS PCM
-- 計算 RMS
-- 系統播放器優先，必要時 fallback 到 `malgo`
-
-### AI 服務
-
-- [internal/services/stt/deepgram.go](/Users/andrew/projects/miko/internal/services/stt/deepgram.go)
-- [internal/services/llm/openai.go](/Users/andrew/projects/miko/internal/services/llm/openai.go)
-- [internal/services/tts/cartesia.go](/Users/andrew/projects/miko/internal/services/tts/cartesia.go)
-- [internal/services/brain/brain.go](/Users/andrew/projects/miko/internal/services/brain/brain.go)
-
-## Avatar
-
-### 後端 motion runtime
-
-- [internal/avatar/motion_controller.go](/Users/andrew/projects/miko/internal/avatar/motion_controller.go)
-- [internal/avatar/pose_manager.go](/Users/andrew/projects/miko/internal/avatar/pose_manager.go)
-- [internal/avatar/expression_manager.go](/Users/andrew/projects/miko/internal/avatar/expression_manager.go)
-- [internal/avatar/types.go](/Users/andrew/projects/miko/internal/avatar/types.go)
-
-### 前端 VRM 套用層
-
-- [frontend/src/App.tsx](/Users/andrew/projects/miko/frontend/src/App.tsx)
-- [frontend/src/avatar/avatar-manager.ts](/Users/andrew/projects/miko/frontend/src/avatar/avatar-manager.ts)
-- [frontend/src/avatar/scene-manager.ts](/Users/andrew/projects/miko/frontend/src/avatar/scene-manager.ts)
-- [frontend/src/avatar/expression-manager.ts](/Users/andrew/projects/miko/frontend/src/avatar/expression-manager.ts)
-- [frontend/src/avatar/pose-manager.ts](/Users/andrew/projects/miko/frontend/src/avatar/pose-manager.ts)
-- [frontend/src/avatar/caption-manager.ts](/Users/andrew/projects/miko/frontend/src/avatar/caption-manager.ts)
-
-## 預設模型
-
-前端預設載入：
-
-- [frontend/public/vrm/Yuna.vrm](/Users/andrew/projects/miko/frontend/public/vrm/Yuna.vrm)
-
-其他可用素材：
-
-- [frontend/public/vrm/Yuki.vrm](/Users/andrew/projects/miko/frontend/public/vrm/Yuki.vrm)
-
-## UI 版面約束
-
-目前介面採固定視窗高度的 Grid/Flex 版面：
-
-- 左側為 Avatar bust view
-- 右側為控制面板與聊天紀錄
-- 只有聊天容器本身允許捲動
-
-前端避免使用會把整個頁面一起捲動的 `scrollIntoView()`，改為只控制聊天容器本身的捲動位置。
+也就是說，桌面應用程式不是把 Python 邏輯重寫進 Go，而是由 Go 負責整合與啟動 sidecar。
 
 ## 平台目標
 
-目前目標平台：
-
 - macOS
-- Linux ARM64
-
-例如 Raspberry Pi。
+- Linux
+- Linux ARM64，例如 Raspberry Pi

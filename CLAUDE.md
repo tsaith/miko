@@ -1,171 +1,161 @@
 # Miko — CLAUDE.md
 
-Miko 是一個桌上型語音智能助理，使用 Wails 封裝 Go 後端與 React 前端，並透過 VRM 顯示 bust view Avatar。
+Miko 的目標架構是：
 
-## 實際技術架構
+- Go + Wails 作為桌面 shell
+- Python 3.12 + gRPC + OpenCV + OpenAI 作為 backend sidecar
+- React + Three.js + VRM 作為前端 UI
 
-- 桌面殼：Wails
-- 後端：Go
-- 前端：TypeScript + React
-- 3D Avatar：Three.js + `@pixiv/three-vrm`
-- 雲端服務：
-  - Deepgram STT
-  - OpenAI LLM
-  - Cartesia TTS
-- OpenAI SDK：
-  - 官方 `github.com/openai/openai-go/v3`
+## 主要原則
 
-## 專案結構
+1. 音訊裝置保留在 Go
+2. Python backend 採 sidecar 形式
+3. 人臉偵測只做 face center
+4. 前端維持 React + Three.js + VRM
+
+## 技術切分
+
+### Go / Wails
+
+負責：
+
+- 桌面應用程式生命週期
+- 前端橋接
+- 麥克風收音
+- 喇叭播放
+- 啟動與監控 Python backend
+- gRPC client
+- 播放 sidecar 回傳的語音
+- macOS / Linux 應用程式建置與打包
+
+Go 端不再提供 STT / LLM / TTS 的主流程。
+
+### Python backend
+
+放在 `backend/`，使用：
+
+- Python 3.12
+- `uv`
+- `grpcio`
+- OpenCV
+- OpenAI
+
+負責：
+
+- face center 偵測
+- STT
+- LLM
+- TTS
+- 對話流程
+- face target 資料
+
+### Frontend
+
+負責：
+
+- VRM 呈現
+- 聊天 UI
+- 字幕
+- API 狀態
+- 交談控制
+
+## 建議專案結構
 
 ```text
 miko/
   main.go
   app.go
   internal/
-    assistant/service.go
-    audio/service.go
+    audio/
+    backendclient/
     config/
-      config.go
-      runtime.go
-    debuglog/logger.go
-    avatar/
-      motion_controller.go
-      pose_manager.go
-      expression_manager.go
-      types.go
-    services/
-      brain/brain.go
-      llm/openai.go
-      stt/deepgram.go
-      tts/cartesia.go
+    debuglog/
+    runtime/
   frontend/
-    src/
-      App.tsx
-      App.css
-      avatar/
-        avatar-manager.ts
-        scene-manager.ts
-        expression-manager.ts
-        pose-manager.ts
-        caption-manager.ts
-        motion-types.ts
-    public/
-      vrm/
-        Yuna.vrm
-        Yuki.vrm
-  config_files/config.yaml.example
+  proto/
+    assistant.proto
+  backend/
+    pyproject.toml
+    uv.lock
+    app/
+      server.py
+      config.py
+      pipeline/
+      services/
+        vision/
+        stt/
+        llm/
+        tts/
 ```
 
-## Runtime Model
+## 通訊模型
 
-Miko 採用後端掌控音訊裝置的桌面助理架構：
+- Frontend <-> Go：
+  - Wails methods
+  - Wails events
+- Go <-> Python：
+  - gRPC over Unix socket
 
-- 後端負責：
-  - 麥克風收音
-  - 喇叭播放
-  - Deepgram STT
-  - OpenAI 回覆生成
-  - Cartesia TTS
-  - Avatar motion frame 生成
-- 前端負責：
-  - VRM 顯示
-  - chat UI
-  - 字幕
-  - listening / thinking / VAD 狀態
-  - 右側聊天面板內部捲動
+建議的 gRPC 能力包含：
 
-## Event Protocol
+- health check
+- session control
+- audio streaming
+- transcript events
+- tts audio streaming
+- face target events
+- avatar motion events
 
-前端呼叫 Go methods：
+## 設定與 Workspace
 
-- `StartListening()`
-- `StopListening()`
-- `GetRuntimeState()`
-
-後端透過 Wails events 推送：
-
-- `listening_state`
-- `vad_status`
-- `chat_update`
-- `chat_status`
-- `tts_start`
-- `tts_end`
-- `avatar_motion`
-- `app_error`
-
-## 設定檔
-
-使用者設定檔位於：
+設定檔：
 
 ```text
 ~/.miko/config.yaml
 ```
 
-API keys 定義在這個檔案裡：
-
-```yaml
-api_keys:
-  openai: YOUR_OPENAI_API_KEY
-  deepgram: YOUR_DEEPGRAM_API_KEY
-  cartesia: YOUR_CARTESIA_API_KEY
-```
-
-這些欄位只提供後端使用，不會序列化到前端。
-
-Miko 啟動時也會自動建立：
+Workspace：
 
 ```text
 ~/.miko/workspace/
-```
-
-## Debug Log
-
-後端會自動將 debug log 寫到：
-
-```text
 ~/.miko/workspace/logs/
 ```
 
-啟動時會自動清理超過 5 天的 `miko-YYYY-MM-DD.log`。
+目前 sidecar 的 STT / LLM / TTS debug log 也會透過 Go 收進同一份 log。
 
-每次對話都會帶 session id，並記錄：
+## 預設模型
 
-- listening start / stop
-- Deepgram utterance lifecycle
-- Deepgram KeepAlive / reconnect lifecycle
-- OpenAI request timing
-- Cartesia request timing
-- audio playback backend 與錯誤
+- [frontend/public/vrm/Yuna.vrm](/Users/andrew/projects/miko/frontend/public/vrm/Yuna.vrm)
 
-## 主要可設定欄位
+## 開發流程
 
-- OpenAI model
-- Deepgram model / language / endpointing
-- Cartesia voice_id / model_id / sample_rate / api_version
-
-Cartesia `voice_id` 的 fallback 為：
-
-```text
-6eb8965c-e295-47bd-a9e4-3eeebb3abcff
-```
-
-## 開發命令
+Go / Wails：
 
 ```bash
 wails dev
-wails build
 ```
 
-如需先安裝前端依賴：
+Frontend：
 
 ```bash
 cd frontend
 npm install
+npm run build
 ```
 
-## 平台目標
+Python backend：
 
-- macOS
-- Linux ARM64
+```bash
+cd backend
+uv sync
+uv run python -m app.server
+```
 
-這包含 Raspberry Pi 類型的 ARM64 Linux 裝置，但仍需要目標系統本身具備可用的音訊輸入輸出裝置與對應驅動。
+## 發佈模型
+
+正式發佈時採用：
+
+- Go / Wails 主程式
+- Python backend sidecar
+
+Go 的責任是產出桌面應用程式，並在 runtime 啟動 sidecar。
