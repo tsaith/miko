@@ -2,15 +2,14 @@ package assistant
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
 	"sync"
-	"time"
 
 	"miko/internal/audio"
-	"miko/internal/avatar"
 	"miko/internal/backendclient"
 	"miko/internal/config"
 	"miko/internal/debuglog"
@@ -26,7 +25,6 @@ type Service struct {
 
 	backend *backendclient.Manager
 	audio   *audio.Service
-	motion  *avatar.MotionController
 	logger  *debuglog.Logger
 
 	mu                sync.Mutex
@@ -60,13 +58,11 @@ func NewService(settings config.Settings, cfg config.Config, cfgPath string, bac
 		emit:       emit,
 		logger:     logger,
 		audio:      audioService,
-		motion:     avatar.NewMotionController(),
 		rootCtx:    rootCtx,
 		rootCancel: rootCancel,
 	}
 
 	logger.Infof("assistant", "service initialized config=%s", cfgPath)
-	go service.motionLoop(rootCtx)
 	return service, nil
 }
 
@@ -137,7 +133,6 @@ func (s *Service) StartListening() error {
 	s.assistantSpeaking = false
 	s.lastSpeechState = false
 	s.pendingTTS = nil
-	s.motion.Reset()
 	s.mu.Unlock()
 	s.logger.SessionInfof(sessionID, "assistant", "start listening")
 
@@ -188,7 +183,6 @@ func (s *Service) StopListening() error {
 	if s.backend != nil {
 		_ = s.backend.StopConversation(sessionID)
 	}
-	s.motion.SetAudioLevel(0)
 	s.resetSession()
 
 	s.emit("listening_state", map[string]bool{"is_listening": false})
@@ -301,13 +295,12 @@ func (s *Service) playBackendAudio(pcm []byte) {
 	}
 
 	err := s.audio.PlayPCM(sessionID, pcm, func(level float64) {
-		s.motion.SetAudioLevel(level)
+		_ = level
 	})
 	s.finishPlayback(err)
 }
 
 func (s *Service) finishPlayback(playErr error) {
-	s.motion.SetAudioLevel(0)
 	s.setAssistantSpeaking(false)
 	s.setProcessing(false)
 	s.emit("tts_end", map[string]any{})
@@ -324,26 +317,6 @@ func (s *Service) consumePendingTTS() []byte {
 	audioData := append([]byte(nil), s.pendingTTS...)
 	s.pendingTTS = nil
 	return audioData
-}
-
-func (s *Service) motionLoop(ctx context.Context) {
-	ticker := time.NewTicker(time.Second / 30)
-	defer ticker.Stop()
-
-	last := time.Now()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case now := <-ticker.C:
-			delta := now.Sub(last).Seconds()
-			if delta > 0.1 {
-				delta = 0.1
-			}
-			last = now
-			s.emit("avatar_motion", s.motion.Tick(delta))
-		}
-	}
 }
 
 func (s *Service) ensureConfigured() error {
@@ -430,8 +403,17 @@ func (s *Service) handleConversationError(err error) {
 	s.emitError(fmt.Sprintf("語音服務中斷：%v", err))
 }
 
-func (s *Service) SetFaceTarget(x float64, y float64, present bool) {
-	s.motion.SetFaceTarget(x, y, present)
+func (s *Service) HandleAvatarMotion(raw string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		s.logger.Warnf("assistant", "avatar motion decode failed: %v", err)
+		return
+	}
+	s.emit("avatar_motion", payload)
 }
 
 func newSessionID() string {

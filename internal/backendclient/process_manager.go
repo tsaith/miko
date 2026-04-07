@@ -47,7 +47,13 @@ type ConversationCallbacks struct {
 	OnChat         func(role string, content string, status string)
 	OnTTSLifecycle func(state string)
 	OnTTSChunk     func(pcm []byte, sampleRate uint32, channels uint32)
+	OnAvatarMotion func(raw string)
 	OnError        func(error)
+}
+
+type VisionCallbacks struct {
+	OnAvatarMotion func(raw string)
+	OnFace         func(x float64, y float64, present bool)
 }
 
 func NewManager(cfg config.BackendConfig, logger *debuglog.Logger) *Manager {
@@ -210,6 +216,12 @@ func (m *Manager) StartConversation(ctx context.Context, sessionID string, callb
 				}
 				continue
 			}
+			if motion := event.GetAvatarMotion(); motion != nil {
+				if callbacks.OnAvatarMotion != nil {
+					callbacks.OnAvatarMotion(motion.GetJson())
+				}
+				continue
+			}
 			if evtErr := event.GetError(); evtErr != nil {
 				m.logger.Warnf("backend", "conversation event error session=%s message=%s", sessionID, evtErr.GetMessage())
 				if callbacks.OnError != nil {
@@ -359,7 +371,7 @@ func (m *Manager) Ping(ctx context.Context) (*backendproto.PingResponse, error) 
 	return resp, nil
 }
 
-func (m *Manager) StartVisionStream(ctx context.Context, onFace func(x float64, y float64, present bool)) error {
+func (m *Manager) StartVisionStream(ctx context.Context, callbacks VisionCallbacks) error {
 	conn, err := grpc.NewClient(
 		m.endpoint(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -400,15 +412,26 @@ func (m *Manager) StartVisionStream(ctx context.Context, onFace func(x float64, 
 			event, err := stream.Recv()
 			if err != nil {
 				m.logger.Warnf("backend", "vision stream closed: %v", err)
-				onFace(0, 0, false)
+				if callbacks.OnFace != nil {
+					callbacks.OnFace(0, 0, false)
+				}
 				return
 			}
 
 			face := event.GetFaceTarget()
-			if face == nil {
+			if face != nil {
+				if callbacks.OnFace != nil {
+					callbacks.OnFace(float64(face.GetX()), float64(face.GetY()), face.GetPresent())
+				}
 				continue
 			}
-			onFace(float64(face.GetX()), float64(face.GetY()), face.GetPresent())
+			motion := event.GetAvatarMotion()
+			if motion == nil {
+				continue
+			}
+			if callbacks.OnAvatarMotion != nil {
+				callbacks.OnAvatarMotion(motion.GetJson())
+			}
 		}
 	}()
 

@@ -9,13 +9,16 @@ import cv2
 
 from app.generated import assistant_pb2, assistant_pb2_grpc
 from app.config import BackendSettings
+from app.lib.face_detector import FaceDetector
 from app.services.event_bus import EventBus
+from app.services.avatar.motion_controller import MotionController
 
 
 class VisionService(assistant_pb2_grpc.VisionServiceServicer):
-    def __init__(self, settings: BackendSettings, event_bus: EventBus) -> None:
+    def __init__(self, settings: BackendSettings, event_bus: EventBus, motion: MotionController) -> None:
         self._settings = settings
         self._event_bus = event_bus
+        self._motion = motion
         self._logger = logging.getLogger("miko.backend.vision")
         self._worker: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -63,7 +66,7 @@ class VisionService(assistant_pb2_grpc.VisionServiceServicer):
         with self._lock:
             self._worker = None
 
-    def _loop(self, capture: cv2.VideoCapture, detector: cv2.CascadeClassifier) -> None:
+    def _loop(self, capture: cv2.VideoCapture, detector: FaceDetector) -> None:
         try:
             last_present: bool | None = None
             last_x = -1.0
@@ -75,38 +78,32 @@ class VisionService(assistant_pb2_grpc.VisionServiceServicer):
                     time.sleep(0.05)
                     continue
 
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = detector.detectMultiScale(
-                    gray,
-                    scaleFactor=1.1,
-                    minNeighbors=5,
-                    minSize=(60, 60),
-                )
-
-                if len(faces) == 0:
-                    if last_present is not False:
-                        self._publish_face(False, 0.0, 0.0)
-                        last_present = False
-                    time.sleep(1 / 15)
-                    continue
-
-                x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-                center_x = (x + w / 2) / frame.shape[1]
-                center_y = (y + h / 2) / frame.shape[0]
-
-                if (
-                    last_present is not True
-                    or abs(center_x - last_x) > 0.01
-                    or abs(center_y - last_y) > 0.01
-                ):
-                    self._publish_face(True, center_x, center_y)
-                    last_present = True
-                    last_x = center_x
-                    last_y = center_y
+                _, present = detector.detect(frame)
+                if present:
+                    x, y, ok = detector.normalized_position()
+                    if ok:
+                        self._motion.set_face_target(x, y, True)
+                        if (
+                            last_present is not True
+                            or abs(x - last_x) > 0.01
+                            or abs(y - last_y) > 0.01
+                        ):
+                            if last_present is not True:
+                                self._logger.info("face acquired x=%.3f y=%.3f", x, y)
+                            self._publish_face(True, x, y)
+                            last_present = True
+                            last_x = x
+                            last_y = y
+                elif last_present is not False:
+                    self._motion.set_face_target(0.5, 0.5, False)
+                    self._logger.info("face lost miss_frames=%d", detector.miss_frames())
+                    self._publish_face(False, 0.0, 0.0)
+                    last_present = False
 
                 time.sleep(1 / 15)
         finally:
             capture.release()
+            detector.close()
             self._logger.info("vision loop stopped")
 
     def _publish_face(self, present: bool, x: float, y: float) -> None:
@@ -120,12 +117,9 @@ class VisionService(assistant_pb2_grpc.VisionServiceServicer):
             )
         )
 
-    def _create_detector(self) -> cv2.CascadeClassifier:
+    def _create_detector(self) -> FaceDetector:
         cascade_path = self._resolve_cascade_path()
-        detector = cv2.CascadeClassifier(str(cascade_path))
-        if detector.empty():
-            raise RuntimeError(f"failed to load haar cascade: {cascade_path}")
-        return detector
+        return FaceDetector(cascade_path)
 
     def _resolve_cascade_path(self) -> Path:
         candidates = []

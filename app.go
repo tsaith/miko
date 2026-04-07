@@ -82,7 +82,9 @@ func (a *App) startup(ctx context.Context) {
 	a.state.Backend = backendStatus(a.backend, cfg.Backend)
 
 	if a.backend != nil && a.backend.Status().Running {
-		if err := a.backend.StartVisionStream(ctx, service.SetFaceTarget); err != nil {
+		if err := a.backend.StartVisionStream(ctx, backendclient.VisionCallbacks{
+			OnAvatarMotion: service.HandleAvatarMotion,
+		}); err != nil {
 			runtime.LogWarningf(ctx, "python backend vision stream start failed: %v", err)
 			if logger != nil {
 				logger.Warnf("app", "python backend vision stream start failed: %v", err)

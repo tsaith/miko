@@ -10,6 +10,7 @@ import grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 from .config import load_settings
+from .services.avatar.motion_controller import MotionController
 from .services.conversation import ConversationService
 from .services.event_bus import EventBus
 from .services.health import HealthService
@@ -30,14 +31,16 @@ def serve() -> None:
     logger = logging.getLogger("miko.backend")
     settings = load_settings()
     event_bus = EventBus()
-    vision_service = VisionService(settings, event_bus)
+    motion_controller = MotionController(event_bus)
+    motion_controller.start()
+    vision_service = VisionService(settings, event_bus, motion_controller)
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     health_servicer = health.HealthServicer(experimental_non_blocking=True)
     health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
     assistant_pb2_grpc.add_HealthServiceServicer_to_server(HealthService(), server)
-    assistant_pb2_grpc.add_ConversationServiceServicer_to_server(ConversationService(settings, event_bus), server)
+    assistant_pb2_grpc.add_ConversationServiceServicer_to_server(ConversationService(settings, event_bus, motion_controller), server)
     assistant_pb2_grpc.add_VisionServiceServicer_to_server(vision_service, server)
 
     address = settings.listen_target()
@@ -54,6 +57,7 @@ def serve() -> None:
     def shutdown(*_: object) -> None:
         logger.info("python backend sidecar shutting down")
         vision_service.stop()
+        motion_controller.stop()
         server.stop(grace=2)
         if settings.socket_path is not None:
             try:

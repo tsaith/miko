@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from app.config import BackendSettings
 from app.generated import assistant_pb2, assistant_pb2_grpc
 
+from .avatar.motion_controller import MotionController
 from .brain_service import BrainService
 from .event_bus import EventBus
 from .llm_service import LLMService
@@ -25,10 +26,11 @@ class ConversationSession:
 
 
 class ConversationService(assistant_pb2_grpc.ConversationServiceServicer):
-    def __init__(self, settings: BackendSettings, event_bus: EventBus) -> None:
+    def __init__(self, settings: BackendSettings, event_bus: EventBus, motion: MotionController) -> None:
         self._settings = settings
         self._config = settings.load_miko_config()
         self._event_bus = event_bus
+        self._motion = motion
         self._logger = logging.getLogger("miko.backend.conversation")
         self._stt = STTService(self._config.deepgram)
         self._llm = LLMService(self._config.openai)
@@ -45,6 +47,8 @@ class ConversationService(assistant_pb2_grpc.ConversationServiceServicer):
                 brain=BrainService(self._llm),
             ),
         )
+        self._motion.set_conversation_active(True)
+        self._motion.set_phase("listen")
         self._logger.info("session started session_id=%s", request.session_id)
         return assistant_pb2.StartSessionResponse(session_id=request.session_id, status="started")
 
@@ -53,6 +57,8 @@ class ConversationService(assistant_pb2_grpc.ConversationServiceServicer):
         session = self._pop_session(request.session_id)
         if session is not None:
             self._finalize_session(request.session_id, session)
+        self._motion.set_conversation_active(False)
+        self._motion.set_phase("idle")
         self._logger.info("session stopped session_id=%s", request.session_id)
         return assistant_pb2.StopSessionResponse(session_id=request.session_id, status="stopped")
 
@@ -114,6 +120,7 @@ class ConversationService(assistant_pb2_grpc.ConversationServiceServicer):
         self._publish_transcript(session_id, text)
         self._publish_chat(session_id, role="user", content=text)
         self._publish_chat(session_id, status="thinking")
+        self._motion.set_phase("think")
 
         try:
             reply = session.brain.process_message(text, session_id=session_id)
@@ -121,6 +128,7 @@ class ConversationService(assistant_pb2_grpc.ConversationServiceServicer):
             self._logger.warning("llm failed session_id=%s err=%s", session_id, exc)
             self._publish_chat(session_id, role="assistant", content="抱歉，我剛剛連不上雲端服務，請稍後再試。")
             self._publish_error(session_id, f"LLM 失敗：{exc}")
+            self._motion.set_phase("listen")
             self._publish_chat(session_id, status="idle")
             return
 
@@ -131,27 +139,43 @@ class ConversationService(assistant_pb2_grpc.ConversationServiceServicer):
         except Exception as exc:
             self._logger.warning("tts failed session_id=%s err=%s", session_id, exc)
             self._publish_error(session_id, f"TTS 失敗：{exc}")
+            self._motion.set_phase("listen")
             self._publish_chat(session_id, status="idle")
             return
 
         if not audio:
             self._publish_error(session_id, "TTS 失敗：Cartesia 未回傳音訊")
+            self._motion.set_phase("listen")
             self._publish_chat(session_id, status="idle")
             return
 
+        tts_sample_rate = self._tts.output_sample_rate()
+        tts_channels = session.channels
+        bytes_per_second = max(1, tts_sample_rate*max(1, tts_channels)*2)
+        playback_duration = len(audio) / float(bytes_per_second)
+        self._logger.info(
+            "tts playback prepared session_id=%s bytes=%d sample_rate=%d channels=%d duration=%.3fs",
+            session_id,
+            len(audio),
+            tts_sample_rate,
+            tts_channels,
+            playback_duration,
+        )
+        self._motion.begin_speaking(playback_duration)
         self._event_bus.publish(
             assistant_pb2.BackendEvent(
                 session_id=session_id,
                 tts_lifecycle=assistant_pb2.TtsLifecycleEvent(state="start"),
             )
         )
+        self._motion.enqueue_speech_audio(audio, tts_sample_rate, tts_channels)
         self._event_bus.publish(
             assistant_pb2.BackendEvent(
                 session_id=session_id,
                 tts_chunk=assistant_pb2.TtsChunkEvent(
                     pcm_s16le=audio,
-                    sample_rate=session.sample_rate,
-                    channels=session.channels,
+                    sample_rate=tts_sample_rate,
+                    channels=tts_channels,
                 ),
             )
         )

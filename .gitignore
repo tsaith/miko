@@ -16,9 +16,8 @@ frontend/public/vrm/*
 *.vrm
 
 # Model files
-models/*
+**/models/*
 
 # Credential
 .env
-env
-env.*
+.env.*

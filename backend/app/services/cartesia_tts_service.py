@@ -90,3 +90,6 @@ class CartesiaTTSService:
             self.sample_rate,
         )
         return audio
+
+    def output_sample_rate(self) -> int:
+        return self.sample_rate

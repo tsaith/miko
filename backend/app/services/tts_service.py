@@ -22,3 +22,6 @@ class TTSService:
 
     def generate_audio(self, text: str, session_id: str = "") -> bytes:
         return self._get_engine().generate_audio(text, session_id=session_id)
+
+    def output_sample_rate(self) -> int:
+        return self._get_engine().output_sample_rate()
