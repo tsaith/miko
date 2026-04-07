@@ -19,6 +19,7 @@ class DeepgramLiveSession:
     sample_rate: int = 16000
     channels: int = 1
     buffer: bytearray = field(default_factory=bytearray)
+    vad_buffer: bytearray = field(default_factory=bytearray)
     speaking: bool = False
     silence_chunks: int = 0
 
@@ -49,8 +50,9 @@ class DeepgramSTTService:
 
         session.sample_rate = sample_rate
         session.channels = channels
+        session.vad_buffer.extend(pcm_s16le)
 
-        if self.vad.is_speech(pcm_s16le):
+        if self._contains_speech(session):
             session.buffer.extend(pcm_s16le)
             session.speaking = True
             session.silence_chunks = 0
@@ -83,8 +85,19 @@ class DeepgramSTTService:
 
     def _reset_session(self, session: DeepgramLiveSession) -> None:
         session.buffer.clear()
+        session.vad_buffer.clear()
         session.speaking = False
         session.silence_chunks = 0
+
+    def _contains_speech(self, session: DeepgramLiveSession) -> bool:
+        frame_bytes = self.vad.frame_bytes(session.sample_rate, session.channels)
+        detected = False
+        while len(session.vad_buffer) >= frame_bytes:
+            chunk = bytes(session.vad_buffer[:frame_bytes])
+            del session.vad_buffer[:frame_bytes]
+            if self.vad.is_speech(chunk, session.sample_rate, session.channels):
+                detected = True
+        return detected
 
     def _transcribe_once(self, pcm_s16le: bytes, sample_rate: int, channels: int) -> str:
         if not self.api_key.strip():
