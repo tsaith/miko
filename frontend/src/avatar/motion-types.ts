@@ -18,6 +18,7 @@ export interface AvatarMotionFrame {
       chestZ: number;
     };
     gaze: {
+      eyeX: number;
       eyeY: number;
     };
     weightShift: {

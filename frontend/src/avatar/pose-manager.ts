@@ -3,8 +3,12 @@ import type { AvatarMotionFrame } from './motion-types';
 import * as THREE from 'three';
 
 interface WindJoint {
+  boneName: string;
   gravityDir: { x: number; y: number; z: number };
+  settings: { gravityPower: number };
   original: { x: number; y: number; z: number };
+  originalPower: number;
+  isHair: boolean;
 }
 
 interface BoneRotationState {
@@ -16,6 +20,7 @@ export class PoseManager {
   private vrm: VRM | null = null;
   private windJoints: WindJoint[] = [];
   private baseRotations = new Map<string, BoneRotationState>();
+  private readonly hairWindPower = 0.7;
 
   setVRM(vrm: VRM): void {
     this.vrm = vrm;
@@ -23,9 +28,14 @@ export class PoseManager {
     this.baseRotations.clear();
     vrm.springBoneManager?.joints.forEach((joint) => {
       const dir = joint.settings.gravityDir;
+      const boneName = joint.bone.name ?? '';
       this.windJoints.push({
+        boneName,
         gravityDir: dir,
+        settings: joint.settings as { gravityPower: number },
         original: { x: dir.x, y: dir.y, z: dir.z },
+        originalPower: joint.settings.gravityPower,
+        isHair: /hair/i.test(boneName),
       });
     });
 
@@ -53,6 +63,7 @@ export class PoseManager {
         chestZ: 0,
       },
       gaze: {
+        eyeX: 0,
         eyeY: 0,
       },
       weightShift: {
@@ -90,16 +101,25 @@ export class PoseManager {
     this.applyBoneRotation('chest', { z: pose.breathing.chestZ });
     this.applyBoneRotation('upperChest', { z: -pose.breathing.chestZ });
 
-    this.applyBoneRotation('leftEye', { y: pose.gaze.eyeY });
-    this.applyBoneRotation('rightEye', { y: pose.gaze.eyeY });
+    this.applyBoneRotation('leftEye', { x: pose.gaze.eyeX, y: pose.gaze.eyeY });
+    this.applyBoneRotation('rightEye', { x: pose.gaze.eyeX, y: pose.gaze.eyeY });
 
     this.applyBoneRotation('hips', { z: pose.weightShift.hipsZ });
     this.applyBoneRotation('spine', { z: pose.weightShift.spineZ });
 
     for (const joint of this.windJoints) {
-      joint.gravityDir.x = joint.original.x + pose.wind.gravity.x;
-      joint.gravityDir.y = joint.original.y + pose.wind.gravity.y;
-      joint.gravityDir.z = joint.original.z + pose.wind.gravity.z;
+      const nextX = joint.original.x + pose.wind.gravity.x;
+      const nextY = joint.original.y + pose.wind.gravity.y;
+      const nextZ = joint.original.z + pose.wind.gravity.z;
+      const nextDir = new THREE.Vector3(nextX, nextY, nextZ).normalize();
+
+      joint.gravityDir.x = nextDir.x;
+      joint.gravityDir.y = nextDir.y;
+      joint.gravityDir.z = nextDir.z;
+
+      joint.settings.gravityPower = joint.isHair
+        ? joint.originalPower + pose.wind.intensity * this.hairWindPower
+        : joint.originalPower;
     }
 
     this.applyBoneRotation('head', { x: pose.wind.head.x, y: pose.wind.head.y, z: pose.wind.head.z });
@@ -111,6 +131,7 @@ export class PoseManager {
       joint.gravityDir.x = joint.original.x;
       joint.gravityDir.y = joint.original.y;
       joint.gravityDir.z = joint.original.z;
+      joint.settings.gravityPower = joint.originalPower;
     }
     this.windJoints = [];
     this.baseRotations.clear();

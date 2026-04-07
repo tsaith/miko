@@ -23,15 +23,6 @@
   transform: translateZ(0);
 }
 
-.avatar-panel::after {
-  content: '';
-  position: absolute;
-  inset: auto 0 0 0;
-  height: 40%;
-  background: linear-gradient(180deg, transparent 0%, rgba(6, 13, 20, 0.48) 40%, rgba(6, 13, 20, 0.82) 100%);
-  pointer-events: none;
-}
-
 .status-orb {
   position: absolute;
   bottom: 1.6rem;

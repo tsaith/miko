@@ -224,10 +224,6 @@ function App() {
         <div ref={chatContainerRef} className="chat-container">
           {chatHistory.length === 0 ? (
             <div className="empty-state">
-              <p>點擊下方按鈕後，後端會開始本機收音，並將語音送往 Deepgram、OpenAI 與 Cartesia。</p>
-              <p className="note">{state?.platform_note}</p>
-              <p className="path">{state?.config_path}</p>
-              <p className="path">{state?.log_path}</p>
             </div>
           ) : (
             chatHistory.map((msg, idx) => (

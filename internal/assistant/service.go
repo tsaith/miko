@@ -13,6 +13,7 @@ import (
 	"miko/internal/avatar"
 	"miko/internal/config"
 	"miko/internal/debuglog"
+	"miko/internal/detection"
 	"miko/internal/services/brain"
 	"miko/internal/services/llm"
 	"miko/internal/services/stt"
@@ -32,6 +33,7 @@ type Service struct {
 	brain  *brain.Service
 	tts    *tts.CartesiaService
 	motion *avatar.MotionController
+	face   *detection.Service
 	logger *debuglog.Logger
 
 	mu                sync.Mutex
@@ -74,6 +76,7 @@ func NewService(settings config.Settings, cfg config.Config, cfgPath string, emi
 
 	logger.Infof("assistant", "service initialized config=%s", cfgPath)
 	go service.motionLoop(rootCtx)
+	service.startFaceDetection(rootCtx)
 	return service, nil
 }
 
@@ -95,6 +98,9 @@ func (s *Service) Close() {
 	s.stt.Finish()
 	s.audio.StopCapture()
 	s.audio.Close()
+	if s.face != nil {
+		s.face.Close()
+	}
 	s.rootCancel()
 }
 
@@ -407,6 +413,23 @@ func loggerDir(logger *debuglog.Logger) string {
 		return ""
 	}
 	return logger.Directory()
+}
+
+func (s *Service) startFaceDetection(ctx context.Context) {
+	faceService, err := detection.NewService(s.logger)
+	if err != nil {
+		s.logger.Warnf("assistant", "face detection unavailable: %v", err)
+		return
+	}
+	if err := faceService.Start(ctx, func(obs detection.Observation) {
+		s.motion.SetFaceTarget(obs.X, obs.Y, obs.Present)
+	}); err != nil {
+		s.logger.Warnf("assistant", "face detection start failed: %v", err)
+		faceService.Close()
+		return
+	}
+	s.face = faceService
+	s.logger.Info("assistant", "face detection started")
 }
 
 func (s *Service) connectSTT(ctx context.Context, sessionID string) error {

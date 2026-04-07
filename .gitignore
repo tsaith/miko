@@ -11,6 +11,9 @@ frontend/package.json.md5
 frontend/public/vrm/*
 *.vrm
 
+# Model files
+models/*
+
 # Credential
 .env
 env

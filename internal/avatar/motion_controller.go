@@ -31,6 +31,12 @@ func (m *MotionController) SetAudioLevel(value float64) {
 	m.expressions.SetMouthOpen(value)
 }
 
+func (m *MotionController) SetFaceTarget(x float64, y float64, present bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pose.SetFaceTarget(x, y, present)
+}
+
 func (m *MotionController) Tick(delta float64) AvatarMotionFrame {
 	m.mu.Lock()
 	defer m.mu.Unlock()
