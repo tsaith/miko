@@ -18,6 +18,8 @@ import (
 
 type EventEmitter func(event string, payload any)
 
+const faceReadyHold = 350 * time.Millisecond
+
 type Service struct {
 	settings   config.Settings
 	config     config.Config
@@ -37,7 +39,11 @@ type Service struct {
 	isProcessing        bool
 	assistantSpeaking   bool
 	lastSpeechState     bool
+	speechGateActive    bool
 	pendingTTS          []byte
+	facePresent         bool
+	facePresentSince    time.Time
+	requireFaceToTalk   bool
 	closed              bool
 
 	rootCtx    context.Context
@@ -61,6 +67,7 @@ func NewService(settings config.Settings, cfg config.Config, cfgPath string, bac
 		audio:      audioService,
 		rootCtx:    rootCtx,
 		rootCancel: rootCancel,
+		requireFaceToTalk: cfg.App.RequireFaceToTalk,
 	}
 
 	logger.Infof("assistant", "service initialized config=%s", cfgPath)
@@ -133,6 +140,7 @@ func (s *Service) StartListening() error {
 	s.isProcessing = false
 	s.assistantSpeaking = false
 	s.lastSpeechState = false
+	s.speechGateActive = false
 	s.pendingTTS = nil
 	s.mu.Unlock()
 	s.logger.SessionInfof(sessionID, "assistant", "start listening")
@@ -203,8 +211,16 @@ func (s *Service) handleCaptureChunk(chunk []byte) {
 		s.lastSpeechState = isSpeech
 		go s.emit("vad_status", map[string]bool{"is_speech": isSpeech})
 	}
+	faceReady := !s.requireFaceToTalk || s.faceReadyLocked()
 	if s.isListening && !s.assistantSpeaking && !s.isProcessing && s.sendQueue != nil {
-		shouldSend = true
+		if s.speechGateActive {
+			shouldSend = true
+		} else if faceReady {
+			shouldSend = true
+			if s.requireFaceToTalk && isSpeech {
+				s.speechGateActive = true
+			}
+		}
 	}
 	sendQueue := s.sendQueue
 	sessionID := s.sessionID
@@ -355,12 +371,18 @@ func (s *Service) setProcessing(value bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.isProcessing = value
+	if value {
+		s.speechGateActive = false
+	}
 }
 
 func (s *Service) setAssistantSpeaking(value bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.assistantSpeaking = value
+	if value {
+		s.speechGateActive = false
+	}
 }
 
 func (s *Service) isCurrentlySpeaking() bool {
@@ -381,6 +403,34 @@ func (s *Service) currentSessionID() string {
 	return s.sessionID
 }
 
+func (s *Service) HandleFaceTarget(_ float64, _ float64, present bool) {
+	s.mu.Lock()
+	wasPresent := s.facePresent
+	if present && !s.facePresent {
+		s.facePresentSince = time.Now()
+	}
+	if !present {
+		s.facePresentSince = time.Time{}
+	}
+	s.facePresent = present
+	sessionID := s.sessionID
+	s.mu.Unlock()
+	if wasPresent != present {
+		s.logger.SessionInfof(sessionID, "assistant", "face_present=%t", present)
+	}
+}
+
+func (s *Service) SetRequireFaceToTalk(enabled bool) {
+	s.mu.Lock()
+	changed := s.requireFaceToTalk != enabled
+	s.requireFaceToTalk = enabled
+	sessionID := s.sessionID
+	s.mu.Unlock()
+	if changed {
+		s.logger.SessionInfof(sessionID, "assistant", "require_face_to_talk=%t", enabled)
+	}
+}
+
 func (s *Service) resetSession() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -393,7 +443,19 @@ func (s *Service) resetSession() {
 	s.isProcessing = false
 	s.assistantSpeaking = false
 	s.lastSpeechState = false
+	s.speechGateActive = false
 	s.pendingTTS = nil
+	s.facePresentSince = time.Time{}
+}
+
+func (s *Service) faceReadyLocked() bool {
+	if !s.facePresent {
+		return false
+	}
+	if s.facePresentSince.IsZero() {
+		return false
+	}
+	return time.Since(s.facePresentSince) >= faceReadyHold
 }
 
 func (s *Service) emitError(message string) {

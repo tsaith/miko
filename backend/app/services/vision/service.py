@@ -9,7 +9,7 @@ import cv2
 
 from app.generated import assistant_pb2, assistant_pb2_grpc
 from app.config import BackendSettings
-from app.lib.face_detector import FaceDetector
+from app.lib.yolo_face_detector import YoloFaceDetector
 from app.services.event_bus import EventBus
 from app.services.avatar.motion_controller import MotionController
 
@@ -66,7 +66,7 @@ class VisionService(assistant_pb2_grpc.VisionServiceServicer):
         with self._lock:
             self._worker = None
 
-    def _loop(self, capture: cv2.VideoCapture, detector: FaceDetector) -> None:
+    def _loop(self, capture: cv2.VideoCapture, detector: YoloFaceDetector) -> None:
         try:
             last_present: bool | None = None
             last_x = -1.0
@@ -117,25 +117,24 @@ class VisionService(assistant_pb2_grpc.VisionServiceServicer):
             )
         )
 
-    def _create_detector(self) -> FaceDetector:
-        cascade_path = self._resolve_cascade_path()
-        return FaceDetector(cascade_path)
+    def _create_detector(self) -> YoloFaceDetector:
+        model_path = self._resolve_model_path()
+        return YoloFaceDetector(model_path)
 
-    def _resolve_cascade_path(self) -> Path:
+    def _resolve_model_path(self) -> Path:
         candidates = []
         if self._settings.models_dir is not None:
-            candidates.append(self._settings.models_dir / "haarcascade_frontalface_default.xml")
+            candidates.append(self._settings.models_dir / "yolov12n-face.pt")
 
         backend_root = Path(__file__).resolve().parents[3]
         candidates.extend(
             [
-                backend_root.parent / "models" / "haarcascade_frontalface_default.xml",
-                backend_root / "models" / "haarcascade_frontalface_default.xml",
-                Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml",
+                backend_root.parent / "models" / "yolov12n-face.pt",
+                backend_root / "models" / "yolov12n-face.pt",
             ]
         )
 
         for candidate in candidates:
             if candidate.exists():
                 return candidate
-        raise FileNotFoundError("cannot locate haarcascade_frontalface_default.xml")
+        raise FileNotFoundError("cannot locate yolov12n-face.pt")

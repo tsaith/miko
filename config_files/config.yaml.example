@@ -12,6 +12,10 @@ api_keys:
   deepgram: YOUR_DEEPGRAM_API_KEY
   cartesia: YOUR_CARTESIA_API_KEY
 
+app:
+  mode: product
+  require_face_to_talk: true
+
 backend:
   enabled: false
   socket_path: ""

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import './App.css';
 import { EventsOn } from '../wailsjs/runtime/runtime';
-import { GetRuntimeState, StartListening, StopListening } from '../wailsjs/go/main/App';
+import { GetRuntimeState, SetRequireFaceToTalk, StartListening, StopListening } from '../wailsjs/go/main/App';
 import { SceneManager } from './avatar/scene-manager';
 import { AvatarManager } from './avatar/avatar-manager';
 import { CaptionManager } from './avatar/caption-manager';
@@ -35,11 +35,12 @@ interface RuntimeState {
     last_error: string;
   };
   config: {
+    app: {
+      mode: 'development' | 'product';
+      require_face_to_talk: boolean;
+    };
     backend: {
       enabled: boolean;
-      transport: string;
-      host: string;
-      port: number;
       socket_path: string;
       launch_mode: string;
       python_module: string;
@@ -77,12 +78,14 @@ function App() {
   const [subtitleThinking, setSubtitleThinking] = useState(false);
   const [subtitleVisible, setSubtitleVisible] = useState(false);
   const [errorText, setErrorText] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const captionManagerRef = useRef<CaptionManager | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneManagerRef = useRef<SceneManager | null>(null);
   const avatarManagerRef = useRef<AvatarManager | null>(null);
+  const autoStartTriggeredRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -223,9 +226,11 @@ function App() {
       state?.providers?.deepgram_configured &&
       state?.providers?.cartesia_configured,
   );
+  const isProductMode = (state?.config?.app?.mode ?? 'product') === 'product';
+  const requireFaceToTalk = Boolean(state?.config?.app?.require_face_to_talk);
   const backendEnabled = Boolean(state?.backend?.enabled);
   const backendReady = Boolean(state?.backend?.enabled && state?.backend?.running);
-  const backendTransport = state?.backend?.transport || state?.config?.backend?.transport || 'auto';
+  const backendTransport = state?.backend?.transport || 'unix';
   const backendEndpoint = state?.backend?.endpoint || 'n/a';
   const backendLabel = !backendEnabled
     ? 'Sidecar Disabled'
@@ -235,6 +240,17 @@ function App() {
   const backendDetail = backendReady
     ? [state?.backend?.service, state?.backend?.version, backendTransport].filter(Boolean).join(' • ')
     : state?.backend?.last_error || `${backendTransport} • ${backendEndpoint}`;
+
+  useEffect(() => {
+    if (!isProductMode || autoStartTriggeredRef.current || isListening || !providersReady) {
+      return;
+    }
+    autoStartTriggeredRef.current = true;
+    void StartListening().catch((err) => {
+      setErrorText(String(err));
+      autoStartTriggeredRef.current = false;
+    });
+  }, [isProductMode, isListening, providersReady]);
 
   const toggleListening = async () => {
     setErrorText('');
@@ -248,6 +264,80 @@ function App() {
       setErrorText(String(err));
     }
   };
+
+  const handleProductCanvasClick = () => {
+    if (!isProductMode) {
+      return;
+    }
+    setMenuOpen(true);
+  };
+
+  const setRequireFaceToTalkMode = async (enabled: boolean) => {
+    try {
+      const next = await SetRequireFaceToTalk(enabled);
+      setState(next as unknown as RuntimeState);
+    } catch (err) {
+      setErrorText(String(err));
+    }
+  };
+
+  const renderProductMenu = () => (
+    <div className="product-menu-backdrop" onClick={() => setMenuOpen(false)}>
+      <div className="product-menu" onClick={(event) => event.stopPropagation()}>
+        <div className="product-menu-title">主選單</div>
+        <button
+          className={`product-menu-item ${isListening ? 'danger' : 'primary'}`}
+          onClick={async () => {
+            await toggleListening();
+          }}
+          disabled={!providersReady && !isListening}
+        >
+          {isListening ? '停止交談' : '開始交談'}
+        </button>
+        <div className="product-menu-group">
+          <div className="product-menu-group-title">交談模式</div>
+          <button
+            className={`product-menu-item option ${requireFaceToTalk ? 'selected' : ''}`}
+            onClick={() => setRequireFaceToTalkMode(true)}
+          >
+            看到使用者才進行交談
+          </button>
+          <button
+            className={`product-menu-item option ${!requireFaceToTalk ? 'selected' : ''}`}
+            onClick={() => setRequireFaceToTalkMode(false)}
+          >
+            不需要看到使用者也能交談
+          </button>
+        </div>
+        <button className="product-menu-item secondary" onClick={() => setMenuOpen(false)}>
+          離開菜單
+        </button>
+        {errorText ? <div className="product-menu-error">{errorText}</div> : null}
+      </div>
+    </div>
+  );
+
+  if (isProductMode) {
+    return (
+      <div className="product-shell" onClick={handleProductCanvasClick}>
+        <section className="avatar-panel product">
+          <canvas ref={canvasRef} />
+          <div className={`status-orb ${isSpeech ? 'active' : ''}`} />
+          <div className={`subtitle-box${subtitleVisible ? ' visible' : ''}`}>
+            {subtitleThinking ? (
+              <span className="subtitle-thinking">
+                思考中
+                <span className="caption-dots">
+                  <span /><span /><span />
+                </span>
+              </span>
+            ) : subtitle}
+          </div>
+        </section>
+        {menuOpen ? renderProductMenu() : null}
+      </div>
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -281,8 +371,7 @@ function App() {
 
         <div ref={chatContainerRef} className="chat-container">
           {chatHistory.length === 0 ? (
-            <div className="empty-state">
-            </div>
+            <div className="empty-state" />
           ) : (
             chatHistory.map((msg, idx) => (
               <div key={`${msg.role}-${idx}`} className={`chat-bubble ${msg.role}`}>

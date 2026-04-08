@@ -6,6 +6,8 @@ export function GetRuntimeState():Promise<config.RuntimeState>;
 
 export function PingBackend():Promise<config.BackendStatus>;
 
+export function SetRequireFaceToTalk(arg1:boolean):Promise<config.RuntimeState>;
+
 export function StartListening():Promise<void>;
 
 export function StopListening():Promise<void>;

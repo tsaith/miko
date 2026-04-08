@@ -84,6 +84,7 @@ func (a *App) startup(ctx context.Context) {
 	if a.backend != nil && a.backend.Status().Running {
 		if err := a.backend.StartVisionStream(ctx, backendclient.VisionCallbacks{
 			OnAvatarMotion: service.HandleAvatarMotion,
+			OnFace:         service.HandleFaceTarget,
 		}); err != nil {
 			runtime.LogWarningf(ctx, "python backend vision stream start failed: %v", err)
 			if logger != nil {
@@ -125,6 +126,14 @@ func (a *App) GetRuntimeState() config.RuntimeState {
 		a.state.Backend = a.backend.Status()
 	}
 	return a.state
+}
+
+func (a *App) SetRequireFaceToTalk(enabled bool) config.RuntimeState {
+	a.state.Config.App.RequireFaceToTalk = enabled
+	if a.assistant != nil {
+		a.assistant.SetRequireFaceToTalk(enabled)
+	}
+	return a.GetRuntimeState()
 }
 
 func (a *App) PingBackend() (config.BackendStatus, error) {

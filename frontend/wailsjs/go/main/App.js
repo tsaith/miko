@@ -10,6 +10,10 @@ export function PingBackend() {
   return window['go']['main']['App']['PingBackend']();
 }
 
+export function SetRequireFaceToTalk(arg1) {
+  return window['go']['main']['App']['SetRequireFaceToTalk'](arg1);
+}
+
 export function StartListening() {
   return window['go']['main']['App']['StartListening']();
 }

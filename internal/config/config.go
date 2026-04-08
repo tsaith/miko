@@ -26,11 +26,17 @@ type Settings struct {
 }
 
 type Config struct {
+	App     AppConfig      `yaml:"app" json:"app"`
 	APIKeys APIKeysConfig `yaml:"api_keys" json:"-"`
 	Backend BackendConfig `yaml:"backend" json:"backend"`
 	LLM     LLMConfig     `yaml:"llm" json:"llm"`
 	STT     STTConfig     `yaml:"stt" json:"stt"`
 	TTS     TTSConfig     `yaml:"tts" json:"tts"`
+}
+
+type AppConfig struct {
+	Mode              string `yaml:"mode" json:"mode"`
+	RequireFaceToTalk bool   `yaml:"require_face_to_talk" json:"require_face_to_talk"`
 }
 
 type APIKeysConfig struct {
@@ -95,6 +101,10 @@ func DefaultSettings() Settings {
 
 func DefaultConfig() Config {
 	return Config{
+		App: AppConfig{
+			Mode:              "product",
+			RequireFaceToTalk: true,
+		},
 		Backend: BackendConfig{
 			Enabled:      false,
 			SocketPath:   "",
@@ -178,6 +188,11 @@ func EnsureConfigDir() (string, error) {
 }
 
 func (c Config) Validate() error {
+	switch c.App.Mode {
+	case "", "development", "product":
+	default:
+		return fmt.Errorf("unsupported app.mode %q", c.App.Mode)
+	}
 	if c.LLM.Engine != "openai" {
 		return fmt.Errorf("unsupported llm.engine %q", c.LLM.Engine)
 	}
@@ -194,6 +209,9 @@ func (c Config) Validate() error {
 	}
 	if c.LLM.OpenAI.Model == "" {
 		c.LLM.OpenAI.Model = DefaultOpenAIModel
+	}
+	if c.App.Mode == "" {
+		c.App.Mode = "product"
 	}
 	if c.Backend.LaunchMode == "" {
 		c.Backend.LaunchMode = "auto"
