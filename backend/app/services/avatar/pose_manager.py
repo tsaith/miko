@@ -187,31 +187,10 @@ class PoseManager:
 
     def _tick_wind(self, delta: float, state: str, allow_face_tracking: bool) -> AvatarWindFrame:
         self.wind_time += delta
-        self.wind_timer -= delta
-
-        if self.wind_timer <= 0:
-            if random.random() < wind_gust_chance:
-                self.wind_target = _random_in(wind_gust_min, wind_gust_max)
-                self.wind_timer = _random_in(0.9, 1.8)
-            else:
-                self.wind_target = _random_in(wind_base_min, wind_base_max)
-                self.wind_timer = _random_in(wind_shift_min, wind_shift_max)
-
-        smoothing = 1.0 - math.exp(-delta * wind_response)
-        self.wind_current += (self.wind_target - self.wind_current) * smoothing
-
-        t = self.wind_time
-        strength_pulse = 1.0 + 0.16 * math.sin(t * 0.63 + 0.4) + 0.08 * math.sin(t * 1.37 + 1.9) + 0.04 * math.sin(t * 3.8 + 0.7)
-        intensity = _clamp(self.wind_current * strength_pulse, 0.08, 0.95)
-
-        dir_x = wind_base_dir_x + 0.08 * math.sin(t * 0.74 + 0.2) + 0.05 * math.sin(t * 2.15 + 2.1)
-        dir_y = wind_base_dir_y + 0.03 * math.sin(t * 1.1 + 1.6) + 0.015 * math.sin(t * 4.4 + 0.5)
-        dir_z = wind_base_dir_z + 0.07 * math.sin(t * 0.58 + 2.4) + 0.03 * math.sin(t * 1.83 + 1.1)
-        dir_len = math.sqrt(dir_x * dir_x + dir_y * dir_y + dir_z * dir_z) or 1.0
         gravity = Vector3Frame(
-            x=(dir_x / dir_len) * intensity,
-            y=(dir_y / dir_len) * intensity,
-            z=(dir_z / dir_len) * intensity,
+            x=0.0,
+            y=0.0,
+            z=0.0,
         )
 
         head_x_target, head_y_target, neck_x_target, neck_y_target = self._head_targets(state, allow_face_tracking)
@@ -220,37 +199,18 @@ class PoseManager:
         self.neck_current_x += (neck_x_target - self.neck_current_x) * neck_lerp
         self.neck_current_y += (neck_y_target - self.neck_current_y) * neck_lerp
 
-        extra_turn = wind_head_turn_y * intensity
-        if state == "idle" and allow_face_tracking and self.face_present:
-            extra_turn *= 0.22
-        elif state == "listen":
-            extra_turn *= 0.45
-        elif state == "think":
-            extra_turn = 0.0
-        elif state == "speak":
-            extra_turn *= 0.7
-
-        head_tilt = wind_head_tilt_z * intensity
-        neck_tilt = wind_neck_tilt_z * intensity
-        if state == "think":
-            head_tilt *= 0.35
-            neck_tilt *= 0.35
-        elif state == "idle" and allow_face_tracking and self.face_present:
-            head_tilt *= 0.55
-            neck_tilt *= 0.55
-
         return AvatarWindFrame(
-            intensity=intensity,
+            intensity=0.0,
             gravity=gravity,
             head=Vector3Frame(
                 x=self.head_current_x,
-                y=self.head_current_y + extra_turn,
-                z=head_tilt,
+                y=self.head_current_y,
+                z=0.0,
             ),
             neck=Vector3Frame(
                 x=self.neck_current_x,
                 y=self.neck_current_y,
-                z=neck_tilt,
+                z=0.0,
             ),
         )
 
