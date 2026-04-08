@@ -121,10 +121,12 @@ var HealthService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ConversationService_StartSession_FullMethodName = "/miko.backend.v1.ConversationService/StartSession"
-	ConversationService_StopSession_FullMethodName  = "/miko.backend.v1.ConversationService/StopSession"
-	ConversationService_StreamAudio_FullMethodName  = "/miko.backend.v1.ConversationService/StreamAudio"
-	ConversationService_StreamEvents_FullMethodName = "/miko.backend.v1.ConversationService/StreamEvents"
+	ConversationService_StartSession_FullMethodName        = "/miko.backend.v1.ConversationService/StartSession"
+	ConversationService_StopSession_FullMethodName         = "/miko.backend.v1.ConversationService/StopSession"
+	ConversationService_StreamAudio_FullMethodName         = "/miko.backend.v1.ConversationService/StreamAudio"
+	ConversationService_StreamEvents_FullMethodName        = "/miko.backend.v1.ConversationService/StreamEvents"
+	ConversationService_NotifyPlaybackState_FullMethodName = "/miko.backend.v1.ConversationService/NotifyPlaybackState"
+	ConversationService_ConfirmBargeIn_FullMethodName      = "/miko.backend.v1.ConversationService/ConfirmBargeIn"
 )
 
 // ConversationServiceClient is the client API for ConversationService service.
@@ -135,6 +137,8 @@ type ConversationServiceClient interface {
 	StopSession(ctx context.Context, in *StopSessionRequest, opts ...grpc.CallOption) (*StopSessionResponse, error)
 	StreamAudio(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[AudioChunk, Ack], error)
 	StreamEvents(ctx context.Context, in *StreamEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackendEvent], error)
+	NotifyPlaybackState(ctx context.Context, in *PlaybackStateRequest, opts ...grpc.CallOption) (*Ack, error)
+	ConfirmBargeIn(ctx context.Context, in *BargeInConfirmRequest, opts ...grpc.CallOption) (*BargeInConfirmResponse, error)
 }
 
 type conversationServiceClient struct {
@@ -197,6 +201,26 @@ func (c *conversationServiceClient) StreamEvents(ctx context.Context, in *Stream
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ConversationService_StreamEventsClient = grpc.ServerStreamingClient[BackendEvent]
 
+func (c *conversationServiceClient) NotifyPlaybackState(ctx context.Context, in *PlaybackStateRequest, opts ...grpc.CallOption) (*Ack, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Ack)
+	err := c.cc.Invoke(ctx, ConversationService_NotifyPlaybackState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *conversationServiceClient) ConfirmBargeIn(ctx context.Context, in *BargeInConfirmRequest, opts ...grpc.CallOption) (*BargeInConfirmResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BargeInConfirmResponse)
+	err := c.cc.Invoke(ctx, ConversationService_ConfirmBargeIn_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ConversationServiceServer is the server API for ConversationService service.
 // All implementations must embed UnimplementedConversationServiceServer
 // for forward compatibility.
@@ -205,6 +229,8 @@ type ConversationServiceServer interface {
 	StopSession(context.Context, *StopSessionRequest) (*StopSessionResponse, error)
 	StreamAudio(grpc.ClientStreamingServer[AudioChunk, Ack]) error
 	StreamEvents(*StreamEventsRequest, grpc.ServerStreamingServer[BackendEvent]) error
+	NotifyPlaybackState(context.Context, *PlaybackStateRequest) (*Ack, error)
+	ConfirmBargeIn(context.Context, *BargeInConfirmRequest) (*BargeInConfirmResponse, error)
 	mustEmbedUnimplementedConversationServiceServer()
 }
 
@@ -226,6 +252,12 @@ func (UnimplementedConversationServiceServer) StreamAudio(grpc.ClientStreamingSe
 }
 func (UnimplementedConversationServiceServer) StreamEvents(*StreamEventsRequest, grpc.ServerStreamingServer[BackendEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method StreamEvents not implemented")
+}
+func (UnimplementedConversationServiceServer) NotifyPlaybackState(context.Context, *PlaybackStateRequest) (*Ack, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method NotifyPlaybackState not implemented")
+}
+func (UnimplementedConversationServiceServer) ConfirmBargeIn(context.Context, *BargeInConfirmRequest) (*BargeInConfirmResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ConfirmBargeIn not implemented")
 }
 func (UnimplementedConversationServiceServer) mustEmbedUnimplementedConversationServiceServer() {}
 func (UnimplementedConversationServiceServer) testEmbeddedByValue()                             {}
@@ -302,6 +334,42 @@ func _ConversationService_StreamEvents_Handler(srv interface{}, stream grpc.Serv
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ConversationService_StreamEventsServer = grpc.ServerStreamingServer[BackendEvent]
 
+func _ConversationService_NotifyPlaybackState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PlaybackStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ConversationServiceServer).NotifyPlaybackState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ConversationService_NotifyPlaybackState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ConversationServiceServer).NotifyPlaybackState(ctx, req.(*PlaybackStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ConversationService_ConfirmBargeIn_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BargeInConfirmRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ConversationServiceServer).ConfirmBargeIn(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ConversationService_ConfirmBargeIn_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ConversationServiceServer).ConfirmBargeIn(ctx, req.(*BargeInConfirmRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ConversationService_ServiceDesc is the grpc.ServiceDesc for ConversationService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -316,6 +384,14 @@ var ConversationService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StopSession",
 			Handler:    _ConversationService_StopSession_Handler,
+		},
+		{
+			MethodName: "NotifyPlaybackState",
+			Handler:    _ConversationService_NotifyPlaybackState_Handler,
+		},
+		{
+			MethodName: "ConfirmBargeIn",
+			Handler:    _ConversationService_ConfirmBargeIn_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

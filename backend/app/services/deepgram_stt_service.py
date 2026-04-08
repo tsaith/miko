@@ -15,6 +15,12 @@ from .vad_service import VADService
 
 
 @dataclass(slots=True)
+class TranscriptResult:
+    kind: str
+    text: str
+
+
+@dataclass(slots=True)
 class DeepgramLiveSession:
     sample_rate: int = 16000
     channels: int = 1
@@ -22,6 +28,10 @@ class DeepgramLiveSession:
     vad_buffer: bytearray = field(default_factory=bytearray)
     speaking: bool = False
     silence_chunks: int = 0
+    speech_bytes: int = 0
+    silence_bytes: int = 0
+    last_partial_text: str = ""
+    last_partial_at: float = 0.0
 
 
 class DeepgramSTTService:
@@ -36,15 +46,21 @@ class DeepgramSTTService:
         self.model = config.model
         self.language = config.language
         self.smart_format = config.smart_format
+        self.endpointing_ms = max(200, config.endpointing_ms)
+        self.utterance_end_ms = max(self.endpointing_ms, config.utterance_end_ms)
         self.vad = vad
-        self.silence_chunks_to_finalize = 14
         self.min_utterance_bytes = 3200
+        self.partial_min_bytes = 6400
+        self.partial_interval_seconds = 0.9
+        self.min_utterance_ms = 850
+        self.force_finalize_ms = max(self.utterance_end_ms+900, 1800)
+        self.long_utterance_ms = 2200
         self._logger = logging.getLogger("miko.backend.stt.deepgram")
 
     def create_live_session(self, sample_rate: int = 16000, channels: int = 1) -> DeepgramLiveSession:
         return DeepgramLiveSession(sample_rate=sample_rate, channels=channels)
 
-    def push_audio(self, session: DeepgramLiveSession, pcm_s16le: bytes, sample_rate: int, channels: int) -> list[str]:
+    def push_audio(self, session: DeepgramLiveSession, pcm_s16le: bytes, sample_rate: int, channels: int) -> list[TranscriptResult]:
         if not pcm_s16le:
             return []
 
@@ -56,24 +72,27 @@ class DeepgramSTTService:
             session.buffer.extend(pcm_s16le)
             session.speaking = True
             session.silence_chunks = 0
-            return []
+            session.speech_bytes += len(pcm_s16le)
+            session.silence_bytes = 0
+            return self._maybe_emit_partial(session)
 
         if not session.speaking:
             return []
 
         session.buffer.extend(pcm_s16le)
         session.silence_chunks += 1
-        if session.silence_chunks < self.silence_chunks_to_finalize:
-            return []
+        session.silence_bytes += len(pcm_s16le)
+        if not self._should_finalize(session):
+            return self._maybe_emit_partial(session)
         return self.finish_live(session)
 
-    def finish_live(self, session: DeepgramLiveSession) -> list[str]:
-        if len(session.buffer) < self.min_utterance_bytes:
-            self._logger.debug("discard short utterance bytes=%d", len(session.buffer))
+    def finish_live(self, session: DeepgramLiveSession) -> list[TranscriptResult]:
+        pcm_s16le = self._buffer_without_trailing_silence(session)
+        if len(pcm_s16le) < self.min_utterance_bytes:
+            self._logger.debug("discard short utterance bytes=%d", len(pcm_s16le))
             self._reset_session(session)
             return []
 
-        pcm_s16le = bytes(session.buffer)
         sample_rate = session.sample_rate
         channels = session.channels
         self._reset_session(session)
@@ -81,13 +100,76 @@ class DeepgramSTTService:
         transcript = self._transcribe_once(pcm_s16le, sample_rate, channels)
         if not transcript:
             return []
-        return [transcript]
+        return [TranscriptResult(kind="final", text=transcript)]
 
     def _reset_session(self, session: DeepgramLiveSession) -> None:
         session.buffer.clear()
         session.vad_buffer.clear()
         session.speaking = False
         session.silence_chunks = 0
+        session.speech_bytes = 0
+        session.silence_bytes = 0
+        session.last_partial_text = ""
+        session.last_partial_at = 0.0
+
+    def _maybe_emit_partial(self, session: DeepgramLiveSession) -> list[TranscriptResult]:
+        payload = self._buffer_without_trailing_silence(session)
+        if len(payload) < self.partial_min_bytes:
+            return []
+        now = time.monotonic()
+        if session.last_partial_at > 0 and (now - session.last_partial_at) < self.partial_interval_seconds:
+            return []
+
+        transcript = self._transcribe_once(payload, session.sample_rate, session.channels)
+        session.last_partial_at = now
+        transcript = transcript.strip()
+        if not transcript or transcript == session.last_partial_text:
+            return []
+        session.last_partial_text = transcript
+        self._logger.info("partial transcript chars=%d", len(transcript))
+        return [TranscriptResult(kind="partial", text=transcript)]
+
+    def _should_finalize(self, session: DeepgramLiveSession) -> bool:
+        silence_ms = self._bytes_to_ms(session.silence_bytes, session.sample_rate, session.channels)
+        if silence_ms < self.endpointing_ms:
+            return False
+
+        speech_ms = self._bytes_to_ms(session.speech_bytes, session.sample_rate, session.channels)
+        transcript_tail = session.last_partial_text.strip()
+        if speech_ms < self.min_utterance_ms and silence_ms < self.utterance_end_ms:
+            return False
+        if self._looks_unfinished(transcript_tail) and silence_ms < self.force_finalize_ms:
+            return False
+        if self._looks_complete(transcript_tail):
+            return True
+        if speech_ms >= self.long_utterance_ms and silence_ms >= max(self.endpointing_ms, 700):
+            return True
+        return silence_ms >= self.force_finalize_ms
+
+    def _buffer_without_trailing_silence(self, session: DeepgramLiveSession) -> bytes:
+        if session.silence_bytes <= 0 or session.silence_bytes >= len(session.buffer):
+            return bytes(session.buffer)
+        return bytes(session.buffer[:-session.silence_bytes])
+
+    def _bytes_to_ms(self, total_bytes: int, sample_rate: int, channels: int) -> int:
+        bytes_per_second = max(1, sample_rate*max(1, channels)*2)
+        return round((total_bytes / bytes_per_second) * 1000)
+
+    def _looks_complete(self, transcript: str) -> bool:
+        text = transcript.strip()
+        if not text:
+            return False
+        if text.endswith(("。", "！", "？", ".", "!", "?")):
+            return True
+        return text.endswith(("嗎", "呢", "吧", "是不是", "對嗎", "好嗎"))
+
+    def _looks_unfinished(self, transcript: str) -> bool:
+        text = transcript.strip()
+        if not text:
+            return False
+        if text.endswith(("，", "、", ",", "...", "…")):
+            return True
+        return text.endswith(("然後", "所以", "因為", "如果", "但是", "而且", "就是", "還有", "例如", "比如"))
 
     def _contains_speech(self, session: DeepgramLiveSession) -> bool:
         frame_bytes = self.vad.frame_bytes(session.sample_rate, session.channels)

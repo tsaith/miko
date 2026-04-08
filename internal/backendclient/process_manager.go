@@ -27,7 +27,10 @@ type Manager struct {
 	cfg     config.BackendConfig
 	logger  *debuglog.Logger
 	cmd     *exec.Cmd
+	rootCtx context.Context
 	running bool
+	closing bool
+	reconnecting bool
 	mode    string
 	target  string
 	service string
@@ -40,6 +43,12 @@ type Manager struct {
 	convAudio     grpc.ClientStreamingClient[backendproto.AudioChunk, backendproto.Ack]
 	convCancel    context.CancelFunc
 	convSessionID string
+	convDesired   *desiredConversation
+
+	visionMu      sync.Mutex
+	visionConn    *grpc.ClientConn
+	visionCancel  context.CancelFunc
+	visionDesired *desiredVision
 }
 
 type ConversationCallbacks struct {
@@ -56,6 +65,17 @@ type VisionCallbacks struct {
 	OnFace         func(x float64, y float64, present bool)
 }
 
+type desiredConversation struct {
+	ctx       context.Context
+	sessionID string
+	callbacks ConversationCallbacks
+}
+
+type desiredVision struct {
+	ctx       context.Context
+	callbacks VisionCallbacks
+}
+
 func NewManager(cfg config.BackendConfig, logger *debuglog.Logger) *Manager {
 	return &Manager{
 		cfg:    cfg,
@@ -69,12 +89,20 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	m.mu.Lock()
+	if m.rootCtx == nil {
+		m.rootCtx = ctx
+	}
+	m.closing = false
 	if m.running {
 		m.mu.Unlock()
 		return nil
 	}
 	m.mu.Unlock()
 
+	return m.startProcess(ctx)
+}
+
+func (m *Manager) startProcess(ctx context.Context) error {
 	command, err := m.buildCommand(ctx)
 	if err != nil {
 		m.setError(err)
@@ -116,7 +144,9 @@ func (m *Manager) Start(ctx context.Context) error {
 	if err := m.WaitUntilReady(readyCtx); err != nil {
 		m.setError(err)
 		m.logger.Warnf("backend", "sidecar ping failed: %v", err)
-		m.Close()
+		if command.Process != nil {
+			_ = command.Process.Kill()
+		}
 		return fmt.Errorf("backend ready check: %w", err)
 	}
 
@@ -125,8 +155,10 @@ func (m *Manager) Start(ctx context.Context) error {
 
 func (m *Manager) Close() {
 	_ = m.StopConversation("")
+	m.stopVisionRuntime()
 
 	m.mu.Lock()
+	m.closing = true
 	cmd := m.cmd
 	m.mu.Unlock()
 
@@ -136,6 +168,17 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) StartConversation(ctx context.Context, sessionID string, callbacks ConversationCallbacks) error {
+	m.convMu.Lock()
+	m.convDesired = &desiredConversation{
+		ctx:       ctx,
+		sessionID: sessionID,
+		callbacks: callbacks,
+	}
+	m.convMu.Unlock()
+	return m.establishConversation(ctx, sessionID, callbacks)
+}
+
+func (m *Manager) establishConversation(ctx context.Context, sessionID string, callbacks ConversationCallbacks) error {
 	conn, err := grpc.NewClient(
 		m.endpoint(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -175,20 +218,14 @@ func (m *Manager) StartConversation(ctx context.Context, sessionID string, callb
 	m.convMu.Unlock()
 
 	go func() {
-		defer func() {
-			_ = m.StopConversation(sessionID)
-		}()
-
 		for {
 			event, err := eventStream.Recv()
 			if err != nil {
+				m.clearConversationRuntime(sessionID)
 				if streamCtx.Err() != nil || ctx.Err() != nil {
 					return
 				}
 				m.logger.Warnf("backend", "conversation stream closed session=%s err=%v", sessionID, err)
-				if callbacks.OnError != nil {
-					callbacks.OnError(fmt.Errorf("conversation stream closed: %w", err))
-				}
 				return
 			}
 
@@ -260,7 +297,70 @@ func (m *Manager) SendAudio(sessionID string, chunk []byte) error {
 	})
 }
 
+func (m *Manager) NotifyPlaybackState(ctx context.Context, sessionID string, state string) error {
+	if sessionID == "" {
+		return errors.New("session id is required")
+	}
+	conn, err := grpc.NewClient(
+		m.endpoint(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return fmt.Errorf("grpc dial: %w", err)
+	}
+	defer conn.Close()
+
+	client := backendproto.NewConversationServiceClient(conn)
+	ack, err := client.NotifyPlaybackState(ctx, &backendproto.PlaybackStateRequest{
+		SessionId: sessionID,
+		State:     state,
+	})
+	if err != nil {
+		return fmt.Errorf("notify playback state: %w", err)
+	}
+	if !ack.GetOk() {
+		return fmt.Errorf("notify playback state rejected: %s", ack.GetMessage())
+	}
+	return nil
+}
+
+func (m *Manager) ConfirmBargeIn(ctx context.Context, sessionID string, pcm []byte, minSpeechMs int) (bool, int, int, error) {
+	if sessionID == "" {
+		return false, 0, 0, errors.New("session id is required")
+	}
+	conn, err := grpc.NewClient(
+		m.endpoint(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("grpc dial: %w", err)
+	}
+	defer conn.Close()
+
+	client := backendproto.NewConversationServiceClient(conn)
+	resp, err := client.ConfirmBargeIn(ctx, &backendproto.BargeInConfirmRequest{
+		SessionId:   sessionID,
+		PcmS16Le:    pcm,
+		SampleRate:  uint32(audio.DefaultSampleRate),
+		Channels:    uint32(audio.DefaultChannels),
+		MinSpeechMs: uint32(max(1, minSpeechMs)),
+	})
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("confirm barge-in: %w", err)
+	}
+	return resp.GetConfirmed(), int(resp.GetSpeechMs()), int(resp.GetSpeechFrames()), nil
+}
+
 func (m *Manager) StopConversation(sessionID string) error {
+	m.convMu.Lock()
+	if m.convDesired != nil && (sessionID == "" || m.convDesired.sessionID == sessionID) {
+		m.convDesired = nil
+	}
+	m.convMu.Unlock()
+	return m.stopConversationRuntime(sessionID)
+}
+
+func (m *Manager) stopConversationRuntime(sessionID string) error {
 	m.convMu.Lock()
 	conn := m.convConn
 	audioStream := m.convAudio
@@ -372,6 +472,16 @@ func (m *Manager) Ping(ctx context.Context) (*backendproto.PingResponse, error) 
 }
 
 func (m *Manager) StartVisionStream(ctx context.Context, callbacks VisionCallbacks) error {
+	m.visionMu.Lock()
+	m.visionDesired = &desiredVision{
+		ctx:       ctx,
+		callbacks: callbacks,
+	}
+	m.visionMu.Unlock()
+	return m.establishVisionStream(ctx, callbacks)
+}
+
+func (m *Manager) establishVisionStream(ctx context.Context, callbacks VisionCallbacks) error {
 	conn, err := grpc.NewClient(
 		m.endpoint(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -400,8 +510,14 @@ func (m *Manager) StartVisionStream(ctx context.Context, callbacks VisionCallbac
 		return fmt.Errorf("stream events: %w", err)
 	}
 
+	streamCtx, cancel := context.WithCancel(context.Background())
+	m.visionMu.Lock()
+	m.visionConn = conn
+	m.visionCancel = cancel
+	m.visionMu.Unlock()
+
 	go func() {
-		defer conn.Close()
+		defer m.clearVisionRuntime(conn)
 		defer func() {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -411,6 +527,9 @@ func (m *Manager) StartVisionStream(ctx context.Context, callbacks VisionCallbac
 		for {
 			event, err := stream.Recv()
 			if err != nil {
+				if streamCtx.Err() != nil || ctx.Err() != nil {
+					return
+				}
 				m.logger.Warnf("backend", "vision stream closed: %v", err)
 				if callbacks.OnFace != nil {
 					callbacks.OnFace(0, 0, false)
@@ -454,6 +573,7 @@ func (m *Manager) wait() {
 		m.cmd = nil
 	}
 	m.running = false
+	closing := m.closing
 	if err != nil {
 		m.lastErr = err.Error()
 	}
@@ -465,9 +585,12 @@ func (m *Manager) wait() {
 
 	if err != nil {
 		m.logger.Warnf("backend", "sidecar exited: %v", err)
-		return
+	} else {
+		m.logger.Info("backend", "sidecar exited")
 	}
-	m.logger.Info("backend", "sidecar exited")
+	if !closing {
+		m.scheduleReconnect()
+	}
 }
 
 func (m *Manager) streamLogs(stream string, reader io.Reader) {
@@ -622,6 +745,134 @@ func (m *Manager) ensureSocketPath() error {
 
 func unixTarget(socketPath string) string {
 	return "unix://" + socketPath
+}
+
+func max(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func (m *Manager) clearConversationRuntime(sessionID string) {
+	m.convMu.Lock()
+	defer m.convMu.Unlock()
+	if sessionID != "" && m.convSessionID != sessionID {
+		return
+	}
+	m.convConn = nil
+	m.convAudio = nil
+	m.convCancel = nil
+	m.convSessionID = ""
+}
+
+func (m *Manager) clearVisionRuntime(conn *grpc.ClientConn) {
+	m.visionMu.Lock()
+	if m.visionConn == conn {
+		m.visionConn = nil
+		m.visionCancel = nil
+	}
+	m.visionMu.Unlock()
+	_ = conn.Close()
+}
+
+func (m *Manager) stopVisionRuntime() {
+	m.visionMu.Lock()
+	cancel := m.visionCancel
+	conn := m.visionConn
+	m.visionCancel = nil
+	m.visionConn = nil
+	m.visionMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if conn != nil {
+		_ = conn.Close()
+	}
+}
+
+func (m *Manager) scheduleReconnect() {
+	m.mu.Lock()
+	if m.closing || m.reconnecting {
+		m.mu.Unlock()
+		return
+	}
+	rootCtx := m.rootCtx
+	m.reconnecting = true
+	m.mu.Unlock()
+
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			m.reconnecting = false
+			m.mu.Unlock()
+		}()
+
+		backoff := time.Second
+		for {
+			if rootCtx == nil || rootCtx.Err() != nil {
+				return
+			}
+			m.logger.Infof("backend", "attempting sidecar reconnect")
+			if err := m.startProcess(rootCtx); err == nil {
+				m.restoreStreams()
+				return
+			} else {
+				m.logger.Warnf("backend", "sidecar reconnect failed: %v", err)
+			}
+
+			timer := time.NewTimer(backoff)
+			select {
+			case <-rootCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if backoff < 5*time.Second {
+				backoff *= 2
+				if backoff > 5*time.Second {
+					backoff = 5 * time.Second
+				}
+			}
+		}
+	}()
+}
+
+func (m *Manager) restoreStreams() {
+	m.restoreConversation()
+	m.restoreVision()
+}
+
+func (m *Manager) restoreConversation() {
+	m.convMu.Lock()
+	desired := m.convDesired
+	activeSessionID := m.convSessionID
+	m.convMu.Unlock()
+	if desired == nil || desired.ctx == nil || desired.ctx.Err() != nil {
+		return
+	}
+	if activeSessionID == desired.sessionID {
+		return
+	}
+	if err := m.establishConversation(desired.ctx, desired.sessionID, desired.callbacks); err != nil {
+		m.logger.Warnf("backend", "restore conversation failed session=%s err=%v", desired.sessionID, err)
+	}
+}
+
+func (m *Manager) restoreVision() {
+	m.visionMu.Lock()
+	desired := m.visionDesired
+	activeConn := m.visionConn
+	m.visionMu.Unlock()
+	if desired == nil || desired.ctx == nil || desired.ctx.Err() != nil {
+		return
+	}
+	if activeConn != nil {
+		return
+	}
+	if err := m.establishVisionStream(desired.ctx, desired.callbacks); err != nil {
+		m.logger.Warnf("backend", "restore vision failed: %v", err)
+	}
 }
 
 func resolveBackendDir() (string, error) {

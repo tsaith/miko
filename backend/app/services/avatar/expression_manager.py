@@ -67,6 +67,14 @@ class ExpressionManager:
         self.speech_frame_duration = frame_duration
         self.speech_frame_elapsed = 0.0
 
+    def stop_speaking(self, immediate: bool = False) -> None:
+        self.speech_levels = []
+        self.speech_cursor = 0
+        self.speech_frame_elapsed = 0.0
+        self.target_mouth = 0.0
+        if immediate:
+            self.current_mouth = 0.0
+
     def tick(self, delta: float, state: str) -> AvatarExpressionFrame:
         if state != self.state:
             self.state = state

@@ -13,6 +13,8 @@ service ConversationService {
   rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
   rpc StreamAudio(stream AudioChunk) returns (Ack);
   rpc StreamEvents(StreamEventsRequest) returns (stream BackendEvent);
+  rpc NotifyPlaybackState(PlaybackStateRequest) returns (Ack);
+  rpc ConfirmBargeIn(BargeInConfirmRequest) returns (BargeInConfirmResponse);
 }
 
 service VisionService {
@@ -64,6 +66,25 @@ message AudioChunk {
   bytes pcm_s16le = 2;
   uint32 sample_rate = 3;
   uint32 channels = 4;
+}
+
+message PlaybackStateRequest {
+  string session_id = 1;
+  string state = 2;
+}
+
+message BargeInConfirmRequest {
+  string session_id = 1;
+  bytes pcm_s16le = 2;
+  uint32 sample_rate = 3;
+  uint32 channels = 4;
+  uint32 min_speech_ms = 5;
+}
+
+message BargeInConfirmResponse {
+  bool confirmed = 1;
+  uint32 speech_ms = 2;
+  uint32 speech_frames = 3;
 }
 
 message BackendEvent {

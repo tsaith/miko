@@ -98,6 +98,16 @@ class MotionController:
             self._phase = "speak"
             self._speak_until = time.monotonic() + duration + tail
 
+    def end_speaking(self, reason: str = "playback_end") -> None:
+        with self._lock:
+            if self._phase != "speak" and self._speak_until <= 0:
+                return
+            next_phase = "listen" if self._conversation_active else "idle"
+            self._logger.info("phase transition %s -> %s reason=%s", self._phase, next_phase, reason)
+            self._phase = next_phase
+            self._speak_until = 0.0
+            self._expressions.stop_speaking(immediate=reason.startswith("playback_interrupt"))
+
     def set_face_target(self, x: float, y: float, present: bool) -> None:
         with self._lock:
             if present:
@@ -127,6 +137,7 @@ class MotionController:
                     self._logger.info("phase transition speak -> %s reason=playback_elapsed", next_phase)
                     self._phase = next_phase
                     self._speak_until = 0.0
+                    self._expressions.stop_speaking(immediate=False)
                 allow_face_tracking = self._face_available(now)
                 desired_state = self._resolve_state(allow_face_tracking)
                 if desired_state != self._state:

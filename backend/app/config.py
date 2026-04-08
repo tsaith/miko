@@ -13,6 +13,18 @@ class DeepgramConfig:
     model: str = "nova-2"
     language: str = "zh-TW"
     smart_format: bool = True
+    endpointing_ms: int = 450
+    utterance_end_ms: int = 1200
+
+
+@dataclass(slots=True)
+class BargeInConfig:
+    enabled: bool = True
+    pre_roll_ms: int = 450
+    candidate_speech_ms: int = 180
+    confirm_speech_ms: int = 320
+    min_mic_level: float = 0.08
+    playback_level_padding: float = 0.04
 
 
 @dataclass(slots=True)
@@ -21,6 +33,14 @@ class OpenAIConfig:
     model: str = "gpt-4o-mini"
     max_output_tokens: int = 250
     temperature: float = 0.7
+
+
+@dataclass(slots=True)
+class TurnAgentConfig:
+    enabled: bool = True
+    model: str = "gpt-4o-mini"
+    max_output_tokens: int = 16
+    temperature: float = 0.0
 
 
 @dataclass(slots=True)
@@ -36,7 +56,9 @@ class CartesiaConfig:
 @dataclass(slots=True)
 class MikoConfig:
     deepgram: DeepgramConfig
+    barge_in: BargeInConfig
     openai: OpenAIConfig
+    turn_agent: TurnAgentConfig
     cartesia: CartesiaConfig
 
 
@@ -56,14 +78,18 @@ class BackendSettings:
         if self.config_path is None or not self.config_path.exists():
             return MikoConfig(
                 deepgram=DeepgramConfig(),
+                barge_in=BargeInConfig(),
                 openai=OpenAIConfig(),
+                turn_agent=TurnAgentConfig(),
                 cartesia=CartesiaConfig(),
             )
 
         raw = yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
         api_keys = raw.get("api_keys") or {}
+        barge_in = raw.get("barge_in") or {}
         llm = raw.get("llm") or {}
         openai = llm.get("openai") or {}
+        turn_agent = llm.get("turn_agent") or {}
         stt = raw.get("stt") or {}
         deepgram = stt.get("deepgram") or {}
         tts = raw.get("tts") or {}
@@ -74,12 +100,28 @@ class BackendSettings:
                 model=str(deepgram.get("model") or "nova-2").strip() or "nova-2",
                 language=str(deepgram.get("language") or "zh-TW").strip() or "zh-TW",
                 smart_format=bool(deepgram.get("smart_format", True)),
+                endpointing_ms=int(deepgram.get("endpointing_ms") or 450),
+                utterance_end_ms=int(deepgram.get("utterance_end_ms") or 1200),
+            ),
+            barge_in=BargeInConfig(
+                enabled=bool(barge_in.get("enabled", True)),
+                pre_roll_ms=int(barge_in.get("pre_roll_ms") or 450),
+                candidate_speech_ms=int(barge_in.get("candidate_speech_ms") or 180),
+                confirm_speech_ms=int(barge_in.get("confirm_speech_ms") or 320),
+                min_mic_level=float(barge_in.get("min_mic_level") or 0.08),
+                playback_level_padding=float(barge_in.get("playback_level_padding") or 0.04),
             ),
             openai=OpenAIConfig(
                 api_key=str(api_keys.get("openai") or "").strip(),
                 model=str(openai.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini",
                 max_output_tokens=int(openai.get("max_output_tokens") or 250),
                 temperature=float(openai.get("temperature") or 0.7),
+            ),
+            turn_agent=TurnAgentConfig(
+                enabled=bool(turn_agent.get("enabled", True)),
+                model=str(turn_agent.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini",
+                max_output_tokens=int(turn_agent.get("max_output_tokens") or 16),
+                temperature=float(turn_agent.get("temperature") or 0.0),
             ),
             cartesia=CartesiaConfig(
                 api_key=str(api_keys.get("cartesia") or "").strip(),
