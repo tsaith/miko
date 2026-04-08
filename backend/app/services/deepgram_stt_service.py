@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -32,6 +33,10 @@ class DeepgramLiveSession:
     silence_bytes: int = 0
     last_partial_text: str = ""
     last_partial_at: float = 0.0
+    pending_partials: list[TranscriptResult] = field(default_factory=list)
+    partial_generation: int = 0
+    partial_in_flight_generation: int | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class DeepgramSTTService:
@@ -58,11 +63,13 @@ class DeepgramSTTService:
         self._logger = logging.getLogger("miko.backend.stt.deepgram")
 
     def create_live_session(self, sample_rate: int = 16000, channels: int = 1) -> DeepgramLiveSession:
+        self.vad.reset_stream_state()
         return DeepgramLiveSession(sample_rate=sample_rate, channels=channels)
 
     def push_audio(self, session: DeepgramLiveSession, pcm_s16le: bytes, sample_rate: int, channels: int) -> list[TranscriptResult]:
+        results = self._drain_partial_results(session)
         if not pcm_s16le:
-            return []
+            return results
 
         session.sample_rate = sample_rate
         session.channels = channels
@@ -74,24 +81,27 @@ class DeepgramSTTService:
             session.silence_chunks = 0
             session.speech_bytes += len(pcm_s16le)
             session.silence_bytes = 0
-            return self._maybe_emit_partial(session)
+            self._maybe_schedule_partial(session)
+            return results
 
         if not session.speaking:
-            return []
+            return results
 
         session.buffer.extend(pcm_s16le)
         session.silence_chunks += 1
         session.silence_bytes += len(pcm_s16le)
         if not self._should_finalize(session):
-            return self._maybe_emit_partial(session)
-        return self.finish_live(session)
+            self._maybe_schedule_partial(session)
+            return results
+        return results + self.finish_live(session)
 
     def finish_live(self, session: DeepgramLiveSession) -> list[TranscriptResult]:
+        results = self._drain_partial_results(session)
         pcm_s16le = self._buffer_without_trailing_silence(session)
         if len(pcm_s16le) < self.min_utterance_bytes:
             self._logger.debug("discard short utterance bytes=%d", len(pcm_s16le))
             self._reset_session(session)
-            return []
+            return results
 
         sample_rate = session.sample_rate
         channels = session.channels
@@ -99,8 +109,8 @@ class DeepgramSTTService:
 
         transcript = self._transcribe_once(pcm_s16le, sample_rate, channels)
         if not transcript:
-            return []
-        return [TranscriptResult(kind="final", text=transcript)]
+            return results
+        return results + [TranscriptResult(kind="final", text=transcript)]
 
     def _reset_session(self, session: DeepgramLiveSession) -> None:
         session.buffer.clear()
@@ -111,23 +121,35 @@ class DeepgramSTTService:
         session.silence_bytes = 0
         session.last_partial_text = ""
         session.last_partial_at = 0.0
+        with session.lock:
+            session.pending_partials.clear()
+            session.partial_generation += 1
+            if session.partial_in_flight_generation == session.partial_generation-1:
+                session.partial_in_flight_generation = None
+        self.vad.reset_stream_state()
 
-    def _maybe_emit_partial(self, session: DeepgramLiveSession) -> list[TranscriptResult]:
+    def _maybe_schedule_partial(self, session: DeepgramLiveSession) -> None:
         payload = self._buffer_without_trailing_silence(session)
         if len(payload) < self.partial_min_bytes:
-            return []
+            return
         now = time.monotonic()
         if session.last_partial_at > 0 and (now - session.last_partial_at) < self.partial_interval_seconds:
-            return []
+            return
 
-        transcript = self._transcribe_once(payload, session.sample_rate, session.channels)
-        session.last_partial_at = now
-        transcript = transcript.strip()
-        if not transcript or transcript == session.last_partial_text:
-            return []
-        session.last_partial_text = transcript
-        self._logger.info("partial transcript chars=%d", len(transcript))
-        return [TranscriptResult(kind="partial", text=transcript)]
+        with session.lock:
+            generation = session.partial_generation
+            if session.partial_in_flight_generation == generation:
+                return
+            session.partial_in_flight_generation = generation
+            session.last_partial_at = now
+
+        worker = threading.Thread(
+            target=self._run_partial_request,
+            args=(session, generation, payload, session.sample_rate, session.channels),
+            name="miko-stt-partial",
+            daemon=True,
+        )
+        worker.start()
 
     def _should_finalize(self, session: DeepgramLiveSession) -> bool:
         silence_ms = self._bytes_to_ms(session.silence_bytes, session.sample_rate, session.channels)
@@ -138,10 +160,12 @@ class DeepgramSTTService:
         transcript_tail = session.last_partial_text.strip()
         if speech_ms < self.min_utterance_ms and silence_ms < self.utterance_end_ms:
             return False
-        if self._looks_unfinished(transcript_tail) and silence_ms < self.force_finalize_ms:
-            return False
         if self._looks_complete(transcript_tail):
             return True
+        if not self._looks_unfinished(transcript_tail) and silence_ms >= self.utterance_end_ms and speech_ms >= self.min_utterance_ms:
+            return True
+        if self._looks_unfinished(transcript_tail) and silence_ms < self.force_finalize_ms:
+            return False
         if speech_ms >= self.long_utterance_ms and silence_ms >= max(self.endpointing_ms, 700):
             return True
         return silence_ms >= self.force_finalize_ms
@@ -180,6 +204,40 @@ class DeepgramSTTService:
             if self.vad.is_speech(chunk, session.sample_rate, session.channels):
                 detected = True
         return detected
+
+    def _drain_partial_results(self, session: DeepgramLiveSession) -> list[TranscriptResult]:
+        with session.lock:
+            if not session.pending_partials:
+                return []
+            results = list(session.pending_partials)
+            session.pending_partials.clear()
+            return results
+
+    def _run_partial_request(
+        self,
+        session: DeepgramLiveSession,
+        generation: int,
+        payload: bytes,
+        sample_rate: int,
+        channels: int,
+    ) -> None:
+        try:
+            transcript = self._transcribe_once(payload, sample_rate, channels).strip()
+        except Exception as exc:
+            self._logger.warning("partial request failed after schedule err=%s", exc)
+            transcript = ""
+
+        with session.lock:
+            if session.partial_generation != generation:
+                return
+            if session.partial_in_flight_generation == generation:
+                session.partial_in_flight_generation = None
+            if not transcript or transcript == session.last_partial_text:
+                return
+            session.last_partial_text = transcript
+            session.pending_partials.append(TranscriptResult(kind="partial", text=transcript))
+
+        self._logger.info("partial transcript chars=%d", len(transcript))
 
     def _transcribe_once(self, pcm_s16le: bytes, sample_rate: int, channels: int) -> str:
         if not self.api_key.strip():

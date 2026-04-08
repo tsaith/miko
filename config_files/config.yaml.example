@@ -18,14 +18,6 @@ backend:
   launch_mode: auto
   python_module: app.server
 
-barge_in:
-  enabled: true
-  pre_roll_ms: 450
-  candidate_speech_ms: 180
-  confirm_speech_ms: 100
-  min_mic_level: 0.08
-  playback_level_padding: 0.04
-
 llm:
   engine: openai
   openai:

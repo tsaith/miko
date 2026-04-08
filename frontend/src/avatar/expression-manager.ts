@@ -10,15 +10,19 @@ export class ExpressionManager {
   }
 
   applyMotion(expressions: AvatarMotionFrame['expressions']): void {
-    if (!this.vrm?.expressionManager) return;
-    this.vrm.expressionManager.setValue('aa', clamp(expressions.aa));
-    this.vrm.expressionManager.setValue('blink', clamp(expressions.blink));
+    const manager = this.vrm?.expressionManager;
+    if (!manager) return;
+
+    const mouthValue = clamp(expressions.aa * 1.35);
+    manager.setValue('aa', mouthValue);
+    manager.setValue('blink', clamp(expressions.blink));
   }
 
   dispose(): void {
-    if (this.vrm?.expressionManager) {
-      this.vrm.expressionManager.setValue('aa', 0);
-      this.vrm.expressionManager.setValue('blink', 0);
+    const manager = this.vrm?.expressionManager;
+    if (manager) {
+      manager.setValue('aa', 0);
+      manager.setValue('blink', 0);
     }
     this.vrm = null;
   }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 import numpy as np
 import torch
@@ -18,7 +19,16 @@ class VADService:
         self.sample_rate = sample_rate
         self.threshold = threshold
         self._logger = logging.getLogger("miko.backend.vad")
-        self.model = load_silero_vad()
+        self._stream_model = load_silero_vad()
+        self._timestamps_model = load_silero_vad()
+        self._stream_lock = threading.Lock()
+        self._timestamps_lock = threading.Lock()
+
+    def reset_stream_state(self) -> None:
+        with self._stream_lock:
+            reset = getattr(self._stream_model, "reset_states", None)
+            if callable(reset):
+                reset()
 
     def frame_samples(self, sample_rate: int | None = None) -> int:
         rate = sample_rate or self.sample_rate
@@ -41,7 +51,8 @@ class VADService:
         if audio_tensor.ndim > 1:
             audio_tensor = audio_tensor.mean(dim=1)
 
-        speech_prob = float(self.model(audio_tensor, rate).item())
+        with self._stream_lock:
+            speech_prob = float(self._stream_model(audio_tensor, rate).item())
         return speech_prob > self.threshold
 
     def get_timestamps(
@@ -56,11 +67,15 @@ class VADService:
         audio_tensor = torch.from_numpy(audio_data).float()
         if audio_tensor.ndim > 1:
             audio_tensor = audio_tensor.mean(dim=1)
-        return get_speech_timestamps(
-            audio_tensor,
-            self.model,
-            sampling_rate=sample_rate or self.sample_rate,
-        )
+        with self._timestamps_lock:
+            reset = getattr(self._timestamps_model, "reset_states", None)
+            if callable(reset):
+                reset()
+            return get_speech_timestamps(
+                audio_tensor,
+                self._timestamps_model,
+                sampling_rate=sample_rate or self.sample_rate,
+            )
 
     def _pcm_to_float32(self, pcm_s16le: bytes, channels: int) -> np.ndarray:
         if len(pcm_s16le) < 2:

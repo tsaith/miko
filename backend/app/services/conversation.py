@@ -28,7 +28,9 @@ class ConversationSession:
     monitor: ConversationMonitor
     sample_rate: int = 16000
     channels: int = 1
-    barge_in_until: float = 0.0
+    pending_tts_audio: bytes = b""
+    pending_tts_sample_rate: int = 16000
+    pending_tts_channels: int = 1
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -137,56 +139,38 @@ class ConversationService(assistant_pb2_grpc.ConversationServiceServicer):
             return assistant_pb2.Ack(ok=False, message="session not found")
 
         if state == "started":
-            session.monitor.on_assistant_speaking()
-            self._logger.info("playback state session_id=%s state=started", session_id)
+            duration = 0.0
+            if session.pending_tts_audio:
+                bytes_per_second = max(1, session.pending_tts_sample_rate * max(1, session.pending_tts_channels) * 2)
+                duration = len(session.pending_tts_audio) / float(bytes_per_second)
+                self._motion.enqueue_speech_audio(
+                    session.pending_tts_audio,
+                    session.pending_tts_sample_rate,
+                    session.pending_tts_channels,
+                )
+                self._motion.begin_speaking(duration)
+            session.monitor.on_assistant_speaking(duration_seconds=duration if duration > 0 else None)
+            self._logger.info(
+                "playback state session_id=%s state=started pending_bytes=%d sample_rate=%d channels=%d duration=%.3f",
+                session_id,
+                len(session.pending_tts_audio),
+                session.pending_tts_sample_rate,
+                session.pending_tts_channels,
+                duration,
+            )
             return assistant_pb2.Ack(ok=True, message="playback started")
 
-        if state in {"ended", "interrupted"}:
-            if state == "interrupted":
-                session.barge_in_until = time.monotonic() + 1.5
-                session.monitor.on_assistant_speak_end("playback_interrupted")
-                session.monitor.on_assistant_listening("assistant_listening_after_interrupt")
-            else:
-                session.barge_in_until = 0.0
-                session.monitor.on_assistant_speak_end()
-                session.monitor.on_assistant_listening()
-            self._motion.end_speaking(reason=f"playback_{state}")
-            self._logger.info("playback state session_id=%s state=%s", session_id, state)
-            return assistant_pb2.Ack(ok=True, message=f"playback {state}")
+        if state == "ended":
+            session.pending_tts_audio = b""
+            session.pending_tts_sample_rate = 16000
+            session.pending_tts_channels = 1
+            session.monitor.on_assistant_speak_end()
+            session.monitor.on_assistant_listening()
+            self._motion.end_speaking(reason="playback_end")
+            self._logger.info("playback state session_id=%s state=ended", session_id)
+            return assistant_pb2.Ack(ok=True, message="playback ended")
 
         return assistant_pb2.Ack(ok=False, message=f"unsupported playback state: {state}")
-
-    def ConfirmBargeIn(
-        self,
-        request: assistant_pb2.BargeInConfirmRequest,
-        context,
-    ) -> assistant_pb2.BargeInConfirmResponse:
-        del context
-        pcm_s16le = bytes(request.pcm_s16le)
-        if not pcm_s16le:
-            return assistant_pb2.BargeInConfirmResponse(confirmed=False, speech_ms=0, speech_frames=0)
-
-        sample_rate = int(request.sample_rate or 16000)
-        channels = int(request.channels or 1)
-        min_speech_ms = int(request.min_speech_ms or self._config.barge_in.confirm_speech_ms)
-        confirmed, speech_ms, speech_frames = self._stt.confirm_barge_in(
-            pcm_s16le,
-            sample_rate,
-            channels,
-            min_speech_ms,
-        )
-        self._logger.info(
-            "barge-in confirm session_id=%s confirmed=%s speech_ms=%d frames=%d",
-            str(request.session_id or "").strip() or "-",
-            confirmed,
-            speech_ms,
-            speech_frames,
-        )
-        return assistant_pb2.BargeInConfirmResponse(
-            confirmed=confirmed,
-            speech_ms=speech_ms,
-            speech_frames=speech_frames,
-        )
 
     def _handle_transcript(self, session_id: str, session: ConversationSession, transcript: TranscriptResult) -> None:
         text = transcript.text.strip()
@@ -194,20 +178,9 @@ class ConversationService(assistant_pb2_grpc.ConversationServiceServicer):
             return
 
         is_final = transcript.kind == "final"
-        is_barge_in = session.barge_in_until > 0 and time.monotonic() <= session.barge_in_until
         session.turn_agent.push_user_text(text, is_final=is_final)
         accumulated_user_text = session.turn_agent.current_user_text()
-        if is_barge_in:
-            session.monitor.on_user_speaking(accumulated_user_text, "user_speaking_barge_in")
-            self._logger.info(
-                "barge-in transcript session_id=%s kind=%s chars=%d accumulated_chars=%d",
-                session_id,
-                transcript.kind,
-                len(text),
-                len(accumulated_user_text),
-            )
-        else:
-            session.monitor.on_user_speaking(accumulated_user_text)
+        session.monitor.on_user_speaking(accumulated_user_text)
         self._publish_transcript(session_id, accumulated_user_text if is_final else text, kind=transcript.kind)
 
         if not is_final:
@@ -241,11 +214,7 @@ class ConversationService(assistant_pb2_grpc.ConversationServiceServicer):
         if not user_text:
             return
 
-        if is_barge_in:
-            session.barge_in_until = 0.0
-            session.monitor.on_user_speak_end(user_text, "user_speak_end_barge_in")
-        else:
-            session.monitor.on_user_speak_end(user_text)
+        session.monitor.on_user_speak_end(user_text)
         self._publish_chat(session_id, role="user", content=user_text)
         self._publish_chat(session_id, status="thinking")
         session.monitor.on_assistant_thinking(user_text)
@@ -287,18 +256,16 @@ class ConversationService(assistant_pb2_grpc.ConversationServiceServicer):
 
         tts_sample_rate = self._tts.output_sample_rate()
         tts_channels = session.channels
-        bytes_per_second = max(1, tts_sample_rate*max(1, tts_channels)*2)
-        playback_duration = len(audio) / float(bytes_per_second)
         self._logger.info(
-            "tts playback prepared session_id=%s bytes=%d sample_rate=%d channels=%d duration=%.3fs",
+            "tts playback prepared session_id=%s bytes=%d sample_rate=%d channels=%d",
             session_id,
             len(audio),
             tts_sample_rate,
             tts_channels,
-            playback_duration,
         )
-        session.monitor.on_assistant_speaking(reply, playback_duration)
-        self._motion.begin_speaking(playback_duration)
+        session.pending_tts_audio = audio
+        session.pending_tts_sample_rate = tts_sample_rate
+        session.pending_tts_channels = tts_channels
         self._event_bus.publish(
             assistant_pb2.BackendEvent(
                 session_id=session_id,
@@ -306,6 +273,13 @@ class ConversationService(assistant_pb2_grpc.ConversationServiceServicer):
             )
         )
         self._motion.enqueue_speech_audio(audio, tts_sample_rate, tts_channels)
+        self._logger.info(
+            "tts speech audio queued session_id=%s bytes=%d sample_rate=%d channels=%d",
+            session_id,
+            len(audio),
+            tts_sample_rate,
+            tts_channels,
+        )
         self._event_bus.publish(
             assistant_pb2.BackendEvent(
                 session_id=session_id,

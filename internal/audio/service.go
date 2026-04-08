@@ -106,7 +106,7 @@ func (s *Service) StopCapture() {
 	s.captureDevice = nil
 }
 
-func (s *Service) PlayPCM(sessionID string, pcm []byte, onLevel func(float64)) error {
+func (s *Service) PlayPCM(sessionID string, pcm []byte, onFrame func([]byte, float64)) error {
 	if len(pcm) == 0 {
 		return nil
 	}
@@ -115,7 +115,7 @@ func (s *Service) PlayPCM(sessionID string, pcm []byte, onLevel func(float64)) e
 	defer s.playbackMu.Unlock()
 	s.stopPlayback.Store(false)
 
-	if err := s.playWithSystemPlayer(sessionID, pcm, onLevel); err == nil {
+	if err := s.playWithSystemPlayer(sessionID, pcm, onFrame); err == nil {
 		return nil
 	} else if !errors.Is(err, errNoSystemPlaybackCommand) {
 		return err
@@ -157,8 +157,9 @@ func (s *Service) PlayPCM(sessionID string, pcm []byte, onLevel func(float64)) e
 					output[i] = 0
 				}
 			}
-			if written > 0 && onLevel != nil {
-				onLevel(NormalizedRMS(output[:written]))
+			if written > 0 && onFrame != nil {
+				frame := append([]byte(nil), output[:written]...)
+				onFrame(frame, NormalizedRMS(frame))
 			}
 			if offset >= len(pcm) {
 				once.Do(func() { close(done) })
@@ -184,8 +185,8 @@ func (s *Service) PlayPCM(sessionID string, pcm []byte, onLevel func(float64)) e
 		time.Sleep(120 * time.Millisecond)
 	}
 	_ = device.Stop()
-	if onLevel != nil {
-		onLevel(0)
+	if onFrame != nil {
+		onFrame(nil, 0)
 	}
 	s.logger.SessionInfof(sessionID, "audio.playback", "play done backend=malgo bytes=%d", len(pcm))
 	return nil
@@ -200,7 +201,7 @@ func (s *Service) StopPlayback() {
 	}
 }
 
-func (s *Service) playWithSystemPlayer(sessionID string, pcm []byte, onLevel func(float64)) error {
+func (s *Service) playWithSystemPlayer(sessionID string, pcm []byte, onFrame func([]byte, float64)) error {
 	player, args, err := playbackCommand()
 	if err != nil {
 		return err
@@ -228,8 +229,8 @@ func (s *Service) playWithSystemPlayer(sessionID string, pcm []byte, onLevel fun
 	stopLevels := make(chan struct{})
 	defer close(stopLevels)
 
-	if onLevel != nil {
-		go streamLevels(pcm, stopLevels, onLevel)
+	if onFrame != nil {
+		go streamLevels(pcm, stopLevels, onFrame)
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -255,8 +256,8 @@ func (s *Service) playWithSystemPlayer(sessionID string, pcm []byte, onLevel fun
 	if waitErr != nil {
 		return fmt.Errorf("system audio player failed: %w", waitErr)
 	}
-	if onLevel != nil {
-		onLevel(0)
+	if onFrame != nil {
+		onFrame(nil, 0)
 	}
 	s.logger.SessionInfof(sessionID, "audio.playback", "play done backend=system player=%s bytes=%d", filepath.Base(player), len(pcm))
 	return nil
@@ -305,22 +306,23 @@ func pcmToWAV(pcm []byte, sampleRate int, channels int, bitsPerSample int) []byt
 	return append(header, pcm...)
 }
 
-func streamLevels(pcm []byte, stop <-chan struct{}, onLevel func(float64)) {
+func streamLevels(pcm []byte, stop <-chan struct{}, onFrame func([]byte, float64)) {
 	const frameBytes = 640 // 20ms of 16kHz mono int16 PCM
 	for offset := 0; offset < len(pcm); offset += frameBytes {
 		end := offset + frameBytes
 		if end > len(pcm) {
 			end = len(pcm)
 		}
-		onLevel(NormalizedRMS(pcm[offset:end]))
+		frame := append([]byte(nil), pcm[offset:end]...)
+		onFrame(frame, NormalizedRMS(frame))
 		select {
 		case <-stop:
-			onLevel(0)
+			onFrame(nil, 0)
 			return
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	onLevel(0)
+	onFrame(nil, 0)
 }
 
 func NormalizedRMS(pcm []byte) float64 {

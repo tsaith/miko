@@ -324,33 +324,6 @@ func (m *Manager) NotifyPlaybackState(ctx context.Context, sessionID string, sta
 	return nil
 }
 
-func (m *Manager) ConfirmBargeIn(ctx context.Context, sessionID string, pcm []byte, minSpeechMs int) (bool, int, int, error) {
-	if sessionID == "" {
-		return false, 0, 0, errors.New("session id is required")
-	}
-	conn, err := grpc.NewClient(
-		m.endpoint(),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		return false, 0, 0, fmt.Errorf("grpc dial: %w", err)
-	}
-	defer conn.Close()
-
-	client := backendproto.NewConversationServiceClient(conn)
-	resp, err := client.ConfirmBargeIn(ctx, &backendproto.BargeInConfirmRequest{
-		SessionId:   sessionID,
-		PcmS16Le:    pcm,
-		SampleRate:  uint32(audio.DefaultSampleRate),
-		Channels:    uint32(audio.DefaultChannels),
-		MinSpeechMs: uint32(max(1, minSpeechMs)),
-	})
-	if err != nil {
-		return false, 0, 0, fmt.Errorf("confirm barge-in: %w", err)
-	}
-	return resp.GetConfirmed(), int(resp.GetSpeechMs()), int(resp.GetSpeechFrames()), nil
-}
-
 func (m *Manager) StopConversation(sessionID string) error {
 	m.convMu.Lock()
 	if m.convDesired != nil && (sessionID == "" || m.convDesired.sessionID == sessionID) {

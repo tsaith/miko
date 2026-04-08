@@ -18,16 +18,6 @@ class DeepgramConfig:
 
 
 @dataclass(slots=True)
-class BargeInConfig:
-    enabled: bool = True
-    pre_roll_ms: int = 450
-    candidate_speech_ms: int = 180
-    confirm_speech_ms: int = 320
-    min_mic_level: float = 0.08
-    playback_level_padding: float = 0.04
-
-
-@dataclass(slots=True)
 class OpenAIConfig:
     api_key: str = ""
     model: str = "gpt-4o-mini"
@@ -56,7 +46,6 @@ class CartesiaConfig:
 @dataclass(slots=True)
 class MikoConfig:
     deepgram: DeepgramConfig
-    barge_in: BargeInConfig
     openai: OpenAIConfig
     turn_agent: TurnAgentConfig
     cartesia: CartesiaConfig
@@ -78,7 +67,6 @@ class BackendSettings:
         if self.config_path is None or not self.config_path.exists():
             return MikoConfig(
                 deepgram=DeepgramConfig(),
-                barge_in=BargeInConfig(),
                 openai=OpenAIConfig(),
                 turn_agent=TurnAgentConfig(),
                 cartesia=CartesiaConfig(),
@@ -86,7 +74,6 @@ class BackendSettings:
 
         raw = yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
         api_keys = raw.get("api_keys") or {}
-        barge_in = raw.get("barge_in") or {}
         llm = raw.get("llm") or {}
         openai = llm.get("openai") or {}
         turn_agent = llm.get("turn_agent") or {}
@@ -102,14 +89,6 @@ class BackendSettings:
                 smart_format=bool(deepgram.get("smart_format", True)),
                 endpointing_ms=int(deepgram.get("endpointing_ms") or 450),
                 utterance_end_ms=int(deepgram.get("utterance_end_ms") or 1200),
-            ),
-            barge_in=BargeInConfig(
-                enabled=bool(barge_in.get("enabled", True)),
-                pre_roll_ms=int(barge_in.get("pre_roll_ms") or 450),
-                candidate_speech_ms=int(barge_in.get("candidate_speech_ms") or 180),
-                confirm_speech_ms=int(barge_in.get("confirm_speech_ms") or 320),
-                min_mic_level=float(barge_in.get("min_mic_level") or 0.08),
-                playback_level_padding=float(barge_in.get("playback_level_padding") or 0.04),
             ),
             openai=OpenAIConfig(
                 api_key=str(api_keys.get("openai") or "").strip(),

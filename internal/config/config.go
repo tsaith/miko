@@ -28,7 +28,6 @@ type Settings struct {
 type Config struct {
 	APIKeys APIKeysConfig `yaml:"api_keys" json:"-"`
 	Backend BackendConfig `yaml:"backend" json:"backend"`
-	BargeIn BargeInConfig `yaml:"barge_in" json:"barge_in"`
 	LLM     LLMConfig     `yaml:"llm" json:"llm"`
 	STT     STTConfig     `yaml:"stt" json:"stt"`
 	TTS     TTSConfig     `yaml:"tts" json:"tts"`
@@ -61,15 +60,6 @@ type OpenAIConfig struct {
 type STTConfig struct {
 	Engine   string         `yaml:"engine" json:"engine"`
 	Deepgram DeepgramConfig `yaml:"deepgram" json:"deepgram"`
-}
-
-type BargeInConfig struct {
-	Enabled              bool    `yaml:"enabled" json:"enabled"`
-	PreRollMs            int     `yaml:"pre_roll_ms" json:"pre_roll_ms"`
-	CandidateSpeechMs    int     `yaml:"candidate_speech_ms" json:"candidate_speech_ms"`
-	ConfirmSpeechMs      int     `yaml:"confirm_speech_ms" json:"confirm_speech_ms"`
-	MinMicLevel          float64 `yaml:"min_mic_level" json:"min_mic_level"`
-	PlaybackLevelPadding float64 `yaml:"playback_level_padding" json:"playback_level_padding"`
 }
 
 type DeepgramConfig struct {
@@ -110,14 +100,6 @@ func DefaultConfig() Config {
 			SocketPath:   "",
 			LaunchMode:   "auto",
 			PythonModule: "app.server",
-		},
-		BargeIn: BargeInConfig{
-			Enabled:              true,
-			PreRollMs:            450,
-			CandidateSpeechMs:    180,
-			ConfirmSpeechMs:      320,
-			MinMicLevel:          0.08,
-			PlaybackLevelPadding: 0.04,
 		},
 		LLM: LLMConfig{
 			Engine: "openai",
@@ -236,24 +218,6 @@ func (c Config) Validate() error {
 	}
 	if c.STT.Deepgram.Language == "" {
 		c.STT.Deepgram.Language = DefaultDeepgramLang
-	}
-	if c.BargeIn.PreRollMs <= 0 {
-		c.BargeIn.PreRollMs = 450
-	}
-	if c.BargeIn.CandidateSpeechMs <= 0 {
-		c.BargeIn.CandidateSpeechMs = 180
-	}
-	if c.BargeIn.ConfirmSpeechMs <= 0 {
-		c.BargeIn.ConfirmSpeechMs = 320
-	}
-	if c.BargeIn.ConfirmSpeechMs < c.BargeIn.CandidateSpeechMs {
-		c.BargeIn.ConfirmSpeechMs = c.BargeIn.CandidateSpeechMs
-	}
-	if c.BargeIn.MinMicLevel <= 0 {
-		c.BargeIn.MinMicLevel = 0.08
-	}
-	if c.BargeIn.PlaybackLevelPadding <= 0 {
-		c.BargeIn.PlaybackLevelPadding = 0.04
 	}
 	return nil
 }

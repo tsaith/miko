@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import random
 import struct
@@ -37,6 +38,7 @@ def _normalized_rms(pcm_s16le: bytes) -> float:
 
 class ExpressionManager:
     def __init__(self) -> None:
+        self._logger = logging.getLogger("miko.backend.avatar.expression")
         self.reset()
 
     def reset(self) -> None:
@@ -51,6 +53,7 @@ class ExpressionManager:
         self.speech_frame_duration = 0.02
         self.speech_frame_elapsed = 0.0
         self.state = "idle"
+        self._mouth_debug_active = False
 
     def enqueue_speech_audio(self, pcm_s16le: bytes, sample_rate: int, channels: int) -> None:
         frame_duration = 0.02
@@ -66,12 +69,24 @@ class ExpressionManager:
         self.speech_cursor = 0
         self.speech_frame_duration = frame_duration
         self.speech_frame_elapsed = 0.0
+        max_level = max(levels) if levels else 0.0
+        avg_level = (sum(levels) / len(levels)) if levels else 0.0
+        self._logger.info(
+            "speech audio enqueued bytes=%d frames=%d sample_rate=%d channels=%d max=%.3f avg=%.3f",
+            len(pcm_s16le),
+            len(levels),
+            sample_rate,
+            channels,
+            max_level,
+            avg_level,
+        )
 
     def stop_speaking(self, immediate: bool = False) -> None:
         self.speech_levels = []
         self.speech_cursor = 0
         self.speech_frame_elapsed = 0.0
         self.target_mouth = 0.0
+        self._mouth_debug_active = False
         if immediate:
             self.current_mouth = 0.0
 
@@ -88,6 +103,11 @@ class ExpressionManager:
         )
 
     def _tick_lip_sync(self, delta: float, state: str) -> None:
+        if state != "speak":
+            self.target_mouth = 0.0
+            self.current_mouth += (self.target_mouth - self.current_mouth) * 0.22
+            return
+
         if self.speech_levels:
             self.speech_frame_elapsed += delta
             while self.speech_cursor < len(self.speech_levels)-1 and self.speech_frame_elapsed >= self.speech_frame_duration:
@@ -106,8 +126,28 @@ class ExpressionManager:
                 self.target_mouth = 0.0
         else:
             self.target_mouth = 0.0
-        smoothing = 0.42 if state == "speak" else 0.24 if state == "think" else 0.3
+        smoothing = 0.42
         self.current_mouth += (self.target_mouth - self.current_mouth) * smoothing
+
+        if self.current_mouth >= 0.03:
+            if not self._mouth_debug_active or self.speech_cursor == 0 or self.speech_cursor % 15 == 0:
+                self._logger.info(
+                    "mouth active state=%s cursor=%d/%d target=%.3f current=%.3f",
+                    state,
+                    self.speech_cursor,
+                    len(self.speech_levels),
+                    self.target_mouth,
+                    self.current_mouth,
+                )
+            self._mouth_debug_active = True
+        elif self._mouth_debug_active and not self.speech_levels:
+            self._logger.info(
+                "mouth returned idle state=%s target=%.3f current=%.3f",
+                state,
+                self.target_mouth,
+                self.current_mouth,
+            )
+            self._mouth_debug_active = False
 
     def _tick_blink(self, delta: float, state: str) -> None:
         if self.blink_phase == "idle":

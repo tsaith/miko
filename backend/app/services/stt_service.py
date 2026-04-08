@@ -15,8 +15,7 @@ class STTService:
 
     def __init__(self, config: DeepgramConfig, engine: str = "deepgram") -> None:
         self.engine = engine
-        self._vad = VADService()
-        self._deepgram = DeepgramSTTService(config, self._vad)
+        self._deepgram = DeepgramSTTService(config, VADService())
 
     def _get_engine(self) -> DeepgramSTTService:
         if self.engine != "deepgram":
@@ -31,21 +30,3 @@ class STTService:
 
     def finish_live(self, session: DeepgramLiveSession) -> list[TranscriptResult]:
         return self._get_engine().finish_live(session)
-
-    def confirm_barge_in(
-        self,
-        pcm_s16le: bytes,
-        sample_rate: int,
-        channels: int,
-        min_speech_ms: int,
-    ) -> tuple[bool, int, int]:
-        timestamps = self._vad.get_timestamps(pcm_s16le, sample_rate, channels)
-        speech_samples = 0
-        for item in timestamps:
-            start = int(item.get("start") or 0)
-            end = int(item.get("end") or 0)
-            if end > start:
-                speech_samples += end - start
-        speech_ms = round((speech_samples / max(1, sample_rate)) * 1000)
-        confirmed = speech_ms >= max(1, min_speech_ms)
-        return confirmed, speech_ms, len(timestamps)
