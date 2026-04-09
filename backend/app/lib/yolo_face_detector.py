@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 
 import numpy as np
 
@@ -41,6 +42,8 @@ class FloatRect:
 
 
 class YoloFaceDetector:
+    DETECT_INTERVAL_SECONDS = 0.1
+
     def __init__(
         self,
         model_path: Path | str,
@@ -65,6 +68,7 @@ class YoloFaceDetector:
         self._face_present = False
         self._miss_frames = 0
         self._confidence = 0.0
+        self._last_detect_at = 0.0
 
     def close(self) -> None:
         self._tracked = None
@@ -75,6 +79,11 @@ class YoloFaceDetector:
         self._confidence = 0.0
 
     def detect(self, frame: np.ndarray) -> tuple[tuple[int, int, int, int] | None, bool]:
+        now = time.monotonic()
+        wait_seconds = self.DETECT_INTERVAL_SECONDS - (now - self._last_detect_at)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
         self._img_h, self._img_w = frame.shape[:2]
 
         results = self._model.predict(
@@ -84,6 +93,7 @@ class YoloFaceDetector:
             verbose=False,
             device=self._device,
         )
+        self._last_detect_at = time.monotonic()
         best = self._best_detection(results, self._img_w, self._img_h)
         if best is None:
             self._miss_frames += 1
